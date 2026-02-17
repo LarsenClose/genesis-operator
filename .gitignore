@@ -5,8 +5,8 @@ bin/
 *.dll
 *.so
 *.dylib
-genesis
-genesis-operator
+/genesis
+/genesis-operator
 
 # Test artifacts
 *.test

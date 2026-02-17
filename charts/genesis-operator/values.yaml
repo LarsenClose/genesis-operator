@@ -1,0 +1,85 @@
+# Default values for genesis-operator
+
+# Number of replicas
+replicaCount: 1
+
+image:
+  repository: ghcr.io/larsenclose/genesis-operator
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Create a service account
+  create: true
+  # Annotations to add (e.g., for IRSA)
+  annotations: {}
+  # Name of the service account
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+# Resource limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Leader election configuration
+leaderElection:
+  enabled: true
+
+# Metrics configuration
+metrics:
+  enabled: true
+  port: 8080
+
+# Health probe configuration
+healthProbe:
+  port: 8081
+
+# Log level (debug, info, error)
+logLevel: info
+
+# AWS configuration for IRSA
+aws:
+  # Enable AWS IRSA
+  irsa:
+    enabled: false
+    # IAM role ARN for the service account
+    roleArn: ""
+
+# Install CRDs
+installCRDs: true
