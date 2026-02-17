@@ -1,0 +1,167 @@
+# Genesis Makefile
+
+# Version info
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Image configuration
+IMG ?= ghcr.io/larsenclose/genesis-operator:$(VERSION)
+
+# Go configuration
+GOFLAGS ?= -trimpath
+LDFLAGS = -w -s -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)
+
+# Tools
+CONTROLLER_GEN ?= $(shell which controller-gen)
+HELM ?= $(shell which helm)
+KIND ?= $(shell which kind)
+KUBECTL ?= $(shell which kubectl)
+
+.PHONY: all
+all: build
+
+##@ General
+
+.PHONY: help
+help: ## Display this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+##@ Development
+
+.PHONY: generate
+generate: ## Generate code (deepcopy, CRDs)
+	$(CONTROLLER_GEN) object:headerFile="" paths="./pkg/api/..."
+	$(CONTROLLER_GEN) crd paths="./pkg/api/..." output:crd:artifacts:config=config/crd/bases
+	cp config/crd/bases/*.yaml charts/genesis-operator/crds/
+
+.PHONY: fmt
+fmt: ## Run go fmt
+	go fmt ./...
+
+.PHONY: vet
+vet: ## Run go vet
+	go vet ./...
+
+.PHONY: lint
+lint: ## Run linters
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		echo "golangci-lint not installed, skipping"; \
+	fi
+
+# Coverage excludes auto-generated code and test mocks
+COVERAGE_EXCLUDE_PATTERN := "(pkg/api/v1alpha1|cmd/operator|internal/kms/mock)$$"
+COVERAGE_PACKAGES := $(shell go list ./... | grep -v -E $(COVERAGE_EXCLUDE_PATTERN))
+
+.PHONY: test
+test: ## Run unit tests
+	go test ./... -v -coverprofile=coverage.out
+
+.PHONY: test-coverage
+test-coverage: test ## Run tests with coverage report
+	go tool cover -html=coverage.out -o coverage.html
+
+.PHONY: test-filtered
+test-filtered: ## Run unit tests with filtered coverage (excludes generated code)
+	go test $(COVERAGE_PACKAGES) -v -coverprofile=coverage-filtered.out
+	@echo "Coverage report (excluding auto-generated code):"
+	@go tool cover -func=coverage-filtered.out | tail -1
+
+.PHONY: test-coverage-filtered
+test-coverage-filtered: test-filtered ## Run filtered tests with HTML coverage report
+	go tool cover -html=coverage-filtered.out -o coverage-filtered.html
+	@echo "Coverage report saved to coverage-filtered.html"
+
+##@ Build
+
+.PHONY: build
+build: ## Build the CLI and operator binaries
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
+
+.PHONY: build-cli
+build-cli: ## Build only the CLI
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
+
+.PHONY: build-operator
+build-operator: ## Build only the operator
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
+
+.PHONY: docker-build
+docker-build: ## Build Docker image
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_DATE=$(BUILD_DATE) -t $(IMG) .
+
+.PHONY: docker-push
+docker-push: ## Push Docker image
+	docker push $(IMG)
+
+##@ Deployment
+
+.PHONY: install-crds
+install-crds: ## Install CRDs into the cluster
+	$(KUBECTL) apply -f config/crd/bases/
+
+.PHONY: uninstall-crds
+uninstall-crds: ## Uninstall CRDs from the cluster
+	$(KUBECTL) delete -f config/crd/bases/ --ignore-not-found
+
+.PHONY: helm-install
+helm-install: ## Install the operator using Helm
+	$(HELM) upgrade --install genesis-operator charts/genesis-operator \
+		--namespace genesis-system --create-namespace
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the operator using Helm
+	$(HELM) uninstall genesis-operator --namespace genesis-system
+
+.PHONY: helm-template
+helm-template: ## Render Helm chart templates
+	$(HELM) template genesis-operator charts/genesis-operator --namespace genesis-system
+
+.PHONY: helm-lint
+helm-lint: ## Lint Helm chart
+	$(HELM) lint charts/genesis-operator
+
+##@ E2E Testing
+
+.PHONY: kind-create
+kind-create: ## Create a kind cluster for testing
+	$(KIND) create cluster --name genesis-test --wait 5m
+
+.PHONY: kind-delete
+kind-delete: ## Delete the kind test cluster
+	$(KIND) delete cluster --name genesis-test
+
+.PHONY: kind-load
+kind-load: docker-build ## Load the image into kind
+	$(KIND) load docker-image $(IMG) --name genesis-test
+
+.PHONY: e2e-setup
+e2e-setup: kind-create kind-load install-crds ## Setup E2E test environment
+	@echo "E2E environment ready"
+
+.PHONY: e2e-test
+e2e-test: ## Run E2E tests (requires e2e-setup first)
+	go test ./test/e2e/... -v -tags=e2e -timeout 10m
+
+.PHONY: e2e-cleanup
+e2e-cleanup: kind-delete ## Cleanup E2E test environment
+
+.PHONY: e2e
+e2e: e2e-setup e2e-test e2e-cleanup ## Run full E2E test cycle
+
+##@ Utilities
+
+.PHONY: clean
+clean: ## Clean build artifacts
+	rm -rf bin/ coverage.out coverage.html
+
+.PHONY: tidy
+tidy: ## Run go mod tidy
+	go mod tidy
+
+.PHONY: verify
+verify: fmt vet lint test ## Run all verification steps
+	@echo "All verification passed"

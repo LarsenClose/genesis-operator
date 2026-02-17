@@ -1,0 +1,106 @@
+name: Bug Report
+description: Report a bug in Genesis
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill out the sections below to help us understand and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: When I run `genesis init --provider aws-kms ...`, the command fails with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Run `genesis init --provider aws-kms --key-arn ...`
+        2. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened. Include any error messages.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Genesis is affected?
+      options:
+        - CLI (genesis command)
+        - Operator (genesis-operator)
+        - Helm Chart
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: KMS Provider
+      description: Which KMS provider were you using?
+      options:
+        - AWS KMS
+        - GCP KMS
+        - Azure Key Vault
+        - OCI Vault
+        - YubiKey
+        - TPM
+        - Mock (testing)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Please provide version information.
+      placeholder: |
+        - Genesis version: (run `genesis version`)
+        - OS: macOS 14.0 / Ubuntu 22.04 / etc.
+        - Go version: (if building from source)
+        - Kubernetes version: (if using operator)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Please include any relevant logs (use --verbose for CLI).
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues to ensure this bug hasn't been reported
+          required: true
+        - label: I have included all relevant information above
+          required: true

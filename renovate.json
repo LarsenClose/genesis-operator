@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "schedule:weekly",
+    ":semanticCommits"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "matchPackagePatterns": ["k8s.io/.*", "sigs.k8s.io/.*"],
+      "groupName": "kubernetes-deps",
+      "automerge": false,
+      "labels": ["k8s-update"]
+    },
+    {
+      "matchPackageNames": ["filippo.io/age", "github.com/getsops/sops/v3"],
+      "groupName": "crypto-deps",
+      "automerge": false,
+      "labels": ["security-sensitive"]
+    },
+    {
+      "matchPackagePatterns": ["github.com/oracle/oci-go-sdk/.*"],
+      "groupName": "oci-sdk",
+      "automerge": false,
+      "labels": ["oci-api-change"]
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "automerge": false,
+      "labels": ["docker-update"]
+    },
+    {
+      "matchManagers": ["helm-values"],
+      "automerge": false,
+      "labels": ["helm-update"]
+    }
+  ],
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  }
+}

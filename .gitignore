@@ -1,0 +1,65 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+genesis
+genesis-operator
+
+# Test artifacts
+*.test
+coverage.out
+coverage-filtered.out
+coverage.html
+coverage-filtered.html
+cli_coverage.out
+*.coverprofile
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.log
+debug
+
+# Local configuration
+*.local
+.env
+.env.*
+
+# Kubernetes local files
+kubeconfig
+*.kubeconfig
+
+# Helm packaging
+*.tgz
+charts/*/charts/
+
+# Temporary files
+tmp/
+temp/
+
+# agentful runtime state
+.agentful/
+
+# Build cache
+dist/
+
+# Claude Code artifacts
+.claude/
+CLAUDE.md
+
+# Coverage artifacts
+coverage-audit.out
+test-coverage-summary.out
+.coverage-config-summary.md
