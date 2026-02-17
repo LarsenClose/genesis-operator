@@ -100,7 +100,7 @@ func (v *Verifier) getMetadata(ctx context.Context, url string) (string, error) 
 	// GCP metadata server requires this header
 	req.Header.Set("Metadata-Flavor", MetadataFlavor)
 
-	resp, err := v.httpClient.Do(req)
+	resp, err := v.httpClient.Do(req) // #nosec G704 -- URL is constructed from trusted GCP metadata server endpoint
 	if err != nil {
 		return "", fmt.Errorf("failed to query metadata server: %w", err)
 	}

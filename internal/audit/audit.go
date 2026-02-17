@@ -171,7 +171,7 @@ func NewJSONLogger(writer io.Writer) *JSONLogger {
 
 // NewJSONLoggerFromPath creates a JSON logger that writes to a file
 func NewJSONLoggerFromPath(path string) (*JSONLogger, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) // #nosec G304 -- path is from operator configuration
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit log file: %w", err)
 	}

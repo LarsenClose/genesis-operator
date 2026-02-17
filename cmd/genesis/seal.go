@@ -83,7 +83,7 @@ func runSeal(cmd *cobra.Command, args []string) error {
 	sopsArgs = append(sopsArgs, sealInput)
 
 	verboseLog("Running: sops %v", sopsArgs)
-	sopsCmd := exec.Command("sops", sopsArgs...)
+	sopsCmd := exec.Command("sops", sopsArgs...) // #nosec G204 -- sops is a trusted binary, args are from validated CLI flags
 	sopsCmd.Stdout = os.Stdout
 	sopsCmd.Stderr = os.Stderr
 

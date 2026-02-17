@@ -98,7 +98,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := os.MkdirAll(initOutput, 0755); err != nil {
+	if err := os.MkdirAll(initOutput, 0750); err != nil {
 		printError(fmt.Errorf("failed to create output directory: %w", err))
 		return err
 	}

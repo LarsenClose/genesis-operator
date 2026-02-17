@@ -109,7 +109,7 @@ func runUnseal(cmd *cobra.Command, args []string) error {
 	}
 	sopsArgs = append(sopsArgs, unsealInput)
 
-	sopsCmd := exec.Command("sops", sopsArgs...)
+	sopsCmd := exec.Command("sops", sopsArgs...) // #nosec G204 -- sops is a trusted binary, args are from validated CLI flags
 	sopsCmd.Env = append(os.Environ(), fmt.Sprintf("SOPS_AGE_KEY=%s", privateKey))
 	sopsCmd.Stdout = os.Stdout
 	sopsCmd.Stderr = os.Stderr

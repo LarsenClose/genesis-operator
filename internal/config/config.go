@@ -132,7 +132,7 @@ func (c *BootstrapConfig) Validate() error {
 }
 
 func Load(path string) (*BootstrapConfig, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is from user-specified config
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -151,7 +151,7 @@ func Save(path string, cfg *BootstrapConfig) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0644); err != nil { // #nosec G306 -- config files are non-sensitive and must be readable
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

@@ -394,7 +394,7 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 		return fmt.Errorf("failed to create config request: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) // #nosec G704 -- URL is constructed from trusted OIDC issuer configuration
 	if err != nil {
 		return fmt.Errorf("failed to fetch OIDC config: %w", err)
 	}
@@ -417,7 +417,7 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 		return fmt.Errorf("failed to create JWKS request: %w", err)
 	}
 
-	jwksResp, err := c.httpClient.Do(jwksReq)
+	jwksResp, err := c.httpClient.Do(jwksReq) // #nosec G704 -- URL is from OIDC discovery document of trusted issuer
 	if err != nil {
 		return fmt.Errorf("failed to fetch JWKS: %w", err)
 	}

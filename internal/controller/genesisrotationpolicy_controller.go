@@ -557,7 +557,7 @@ func (r *GenesisRotationPolicyReconciler) sendPagerDutyEvent(ctx context.Context
 	}
 
 	// Send the request
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- URL is the PagerDuty events API endpoint, a trusted service
 	if err != nil {
 		return fmt.Errorf("failed to send PagerDuty request: %w", err)
 	}
@@ -679,7 +679,7 @@ func (r *GenesisRotationPolicyReconciler) postWebhook(ctx context.Context, webho
 	}
 
 	// Send the request
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- URL is from operator-configured webhook notification target
 	if err != nil {
 		return fmt.Errorf("failed to send webhook request: %w", err)
 	}

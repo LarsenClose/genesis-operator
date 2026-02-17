@@ -10,7 +10,7 @@ import (
 )
 
 type AgeKeypair struct {
-	PrivateKey string
+	PrivateKey string // #nosec G117 -- this is an age encryption keypair, not a credential
 	PublicKey  string
 }
 
