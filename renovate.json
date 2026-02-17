@@ -5,6 +5,7 @@
     "schedule:weekly",
     ":semanticCommits"
   ],
+  "platformAutomerge": true,
   "packageRules": [
     {
       "matchManagers": ["gomod"],
@@ -43,6 +44,18 @@
       "matchManagers": ["helm-values"],
       "automerge": false,
       "labels": ["helm-update"]
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "labels": ["github-actions"]
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["github-actions"]
     }
   ],
   "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
