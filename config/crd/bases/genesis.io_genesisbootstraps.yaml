@@ -72,6 +72,46 @@ spec:
                     required:
                     - serviceAccount
                     type: object
+                  githubActions:
+                    description: GitHubActions contains GitHub Actions OIDC configuration
+                    properties:
+                      allowedActors:
+                        description: AllowedActors restricts which actors can authenticate
+                        items:
+                          type: string
+                        type: array
+                      audience:
+                        description: Audience is the expected audience claim (defaults
+                          to genesis-operator)
+                        type: string
+                      environment:
+                        description: Environment restricts to a specific GitHub environment
+                        type: string
+                      ref:
+                        description: Ref restricts to a specific ref (e.g., "refs/heads/main")
+                        type: string
+                      refPatterns:
+                        description: RefPatterns is a list of ref patterns to allow
+                          (glob-style)
+                        items:
+                          type: string
+                        type: array
+                      repository:
+                        description: Repository restricts to a specific repository
+                          (e.g., "owner/repo")
+                        type: string
+                      repositoryOwner:
+                        description: RepositoryOwner restricts to repositories owned
+                          by this user/org
+                        type: string
+                      requireEnvironment:
+                        description: RequireEnvironment requires the environment claim
+                          to be present
+                        type: boolean
+                      workflow:
+                        description: Workflow restricts to a specific workflow file
+                        type: string
+                    type: object
                   oidc:
                     description: OIDC contains OIDC-based identity configuration
                     properties:
@@ -137,14 +177,31 @@ spec:
                     required:
                     - keyName
                     type: object
+                  ociVault:
+                    description: OCIVault contains OCI Vault specific configuration
+                    properties:
+                      cryptoEndpoint:
+                        description: CryptoEndpoint is the cryptographic endpoint
+                          for the vault
+                        type: string
+                      keyOcid:
+                        description: KeyOCID is the OCID of the master encryption
+                          key
+                        type: string
+                    required:
+                    - cryptoEndpoint
+                    - keyOcid
+                    type: object
                   provider:
                     description: Provider specifies the KMS provider type
                     enum:
                     - aws-kms
                     - gcp-kms
                     - azure-keyvault
+                    - oci-vault
                     - yubikey
                     - tpm
+                    - mock
                     type: string
                   publicKey:
                     description: PublicKey is the age public key (for reference, not

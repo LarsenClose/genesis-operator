@@ -177,14 +177,31 @@ spec:
                     required:
                     - keyName
                     type: object
+                  ociVault:
+                    description: OCIVault contains OCI Vault specific configuration
+                    properties:
+                      cryptoEndpoint:
+                        description: CryptoEndpoint is the cryptographic endpoint
+                          for the vault
+                        type: string
+                      keyOcid:
+                        description: KeyOCID is the OCID of the master encryption
+                          key
+                        type: string
+                    required:
+                    - cryptoEndpoint
+                    - keyOcid
+                    type: object
                   provider:
                     description: Provider specifies the KMS provider type
                     enum:
                     - aws-kms
                     - gcp-kms
                     - azure-keyvault
+                    - oci-vault
                     - yubikey
                     - tpm
+                    - mock
                     type: string
                   publicKey:
                     description: PublicKey is the age public key (for reference, not

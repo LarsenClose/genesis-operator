@@ -44,7 +44,7 @@ type GenesisBootstrapSpec struct {
 // EnvelopeSpec defines the envelope-encrypted master key configuration
 type EnvelopeSpec struct {
 	// Provider specifies the KMS provider type
-	// +kubebuilder:validation:Enum=aws-kms;gcp-kms;azure-keyvault;oci-vault;yubikey;tpm
+	// +kubebuilder:validation:Enum=aws-kms;gcp-kms;azure-keyvault;oci-vault;yubikey;tpm;mock
 	Provider string `json:"provider"`
 
 	// AWSKms contains AWS KMS specific configuration

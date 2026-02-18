@@ -26,6 +26,7 @@ import (
 	"github.com/larsenclose/genesis/internal/kms/awskms"
 	"github.com/larsenclose/genesis/internal/kms/azurekv"
 	"github.com/larsenclose/genesis/internal/kms/gcpkms"
+	kmsmock "github.com/larsenclose/genesis/internal/kms/mock"
 	"github.com/larsenclose/genesis/internal/kms/ocivault"
 	"github.com/larsenclose/genesis/internal/kms/tpm"
 	"github.com/larsenclose/genesis/internal/kms/yubikey"
@@ -102,6 +103,9 @@ func (f *DefaultProviderFactory) CreateProvider(ctx context.Context, bootstrap *
 			}
 		}
 		return tpm.NewProvider(opts)
+
+	case "mock":
+		return kmsmock.NewProvider(), nil
 
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", bootstrap.Spec.Envelope.Provider)
