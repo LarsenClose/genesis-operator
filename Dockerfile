@@ -1,5 +1,7 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+ARG TARGETARCH
 
 WORKDIR /workspace
 
@@ -18,13 +20,13 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-# Build the operator
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build the operator for the target architecture
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
     -o manager ./cmd/operator
 
-# Build the CLI
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build the CLI for the target architecture
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
     -o genesis ./cmd/genesis
 
