@@ -26,6 +26,13 @@ jobs:
           go-version: '1.24'
           cache: true
 
+      - name: Install sops
+        run: |
+          SOPS_VERSION=3.9.4
+          curl -Lo sops https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64
+          chmod +x sops
+          sudo mv sops /usr/local/bin/
+
       - name: Run tests
         run: go test -v ./...
 
