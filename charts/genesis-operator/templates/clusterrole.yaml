@@ -32,6 +32,33 @@ rules:
       - genesisbootstraps/finalizers
     verbs:
       - update
+  # GenesisRotationPolicy resources
+  - apiGroups:
+      - genesis.io
+    resources:
+      - genesisrotationpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - genesis.io
+    resources:
+      - genesisrotationpolicies/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - genesis.io
+    resources:
+      - genesisrotationpolicies/finalizers
+    verbs:
+      - update
   # Secrets management
   - apiGroups:
       - ""
