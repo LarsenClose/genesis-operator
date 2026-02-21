@@ -19,13 +19,13 @@ import (
 )
 
 var (
-	rotateConfigPath      string
-	rotateNewProvider     string
-	rotateNewKeyArn       string
-	rotateNewKeyName      string
-	rotateNewVaultURL     string
-	rotateNewKeyOCID      string
-	rotateNewCryptoEP     string
+	rotateConfigPath  string
+	rotateNewProvider string
+	rotateNewKeyArn   string
+	rotateNewKeyName  string
+	rotateNewVaultURL string
+	rotateNewKeyOCID  string
+	rotateNewCryptoEP string
 )
 
 var rotateCmd = &cobra.Command{
