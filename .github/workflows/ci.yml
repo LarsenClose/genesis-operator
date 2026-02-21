@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.13'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Verify go mod tidy
@@ -64,7 +64,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.13'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: golangci-lint
@@ -81,7 +81,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.13'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Build CLI
@@ -99,7 +99,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.13'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Run govulncheck
@@ -181,7 +181,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.13'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Create kind cluster
