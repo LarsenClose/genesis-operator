@@ -1,5 +1,7 @@
 # Genesis
 
+[![CI](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/LarsenClose/genesis-operator)](https://goreportcard.com/report/github.com/LarsenClose/genesis-operator) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **Universal GitOps Secrets Bootstrap**
 
 Genesis solves the "chicken-and-egg" problem in GitOps secrets management: you need secrets to deploy secrets managers, but your secrets manager is supposed to manage your secrets.
