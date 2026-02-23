@@ -1,24 +1,17 @@
 package main
 
 import (
-	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/larsenclose/genesis/internal/bridge"
 	"github.com/larsenclose/genesis/internal/config"
-	"github.com/larsenclose/genesis/internal/crypto"
-	"github.com/larsenclose/genesis/internal/envelope"
 	"github.com/larsenclose/genesis/internal/kms"
-	"github.com/larsenclose/genesis/internal/kms/awskms"
-	"github.com/larsenclose/genesis/internal/kms/azurekv"
-	"github.com/larsenclose/genesis/internal/kms/gcpkms"
-	"github.com/larsenclose/genesis/internal/kms/mock"
-	"github.com/larsenclose/genesis/internal/kms/ocivault"
-	"github.com/larsenclose/genesis/internal/kms/tpm"
-	"github.com/larsenclose/genesis/internal/kms/yubikey"
 	"github.com/spf13/cobra"
 )
 
@@ -73,37 +66,37 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
-
 	verboseLog("Initializing genesis with provider: %s", initProvider)
 
-	provider, err := createKMSProvider(ctx)
-	if err != nil {
+	// Validate provider flags before touching the bridge.
+	if err := validateInitProviderFlags(); err != nil {
 		printError(err)
 		return err
 	}
 
-	verboseLog("Generating age keypair...")
-	keypair, err := crypto.GenerateAgeKeypair()
+	genesisConfigJSON := buildGenesisConfigJSON(initProvider)
+	h, err := bridge.New(genesisConfigJSON)
 	if err != nil {
-		printError(fmt.Errorf("failed to generate age keypair: %w", err))
+		printError(fmt.Errorf("failed to create genesis instance: %w", err))
 		return err
 	}
-	verboseLog("Generated public key: %s", keypair.PublicKey)
+	defer h.Free()
 
-	verboseLog("Creating envelope encryption...")
-	env, err := envelope.Create(ctx, provider, keypair.PrivateKey)
+	kmsConfigJSON := buildKmsConfigJSON(initProvider)
+	verboseLog("Generating keypair and creating envelope via bridge...")
+	artifacts, err := h.Init(kmsConfigJSON)
 	if err != nil {
-		printError(fmt.Errorf("failed to create envelope: %w", err))
+		printError(fmt.Errorf("failed to initialize genesis: %w", err))
 		return err
 	}
+	verboseLog("Generated public key: %s", artifacts.PublicKey)
 
 	if err := os.MkdirAll(initOutput, 0750); err != nil {
 		printError(fmt.Errorf("failed to create output directory: %w", err))
 		return err
 	}
 
-	bootstrapConfig := buildBootstrapConfig(env)
+	bootstrapConfig := buildBootstrapConfigFromArtifacts(artifacts)
 	bootstrapPath := filepath.Join(initOutput, "genesis-bootstrap.yaml")
 	verboseLog("Writing bootstrap config to: %s", bootstrapPath)
 	if err := config.Save(bootstrapPath, bootstrapConfig); err != nil {
@@ -111,7 +104,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	sopsConfig := config.NewSOPSConfig(keypair.PublicKey)
+	sopsConfig := config.NewSOPSConfig(artifacts.PublicKey)
 	sopsPath := filepath.Join(initOutput, ".sops.yaml")
 	verboseLog("Writing SOPS config to: %s", sopsPath)
 	if err := sopsConfig.Save(sopsPath); err != nil {
@@ -120,7 +113,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	result := InitResult{
-		PublicKey:     keypair.PublicKey,
+		PublicKey:     artifacts.PublicKey,
 		Provider:      initProvider,
 		BootstrapFile: bootstrapPath,
 		SOPSFile:      sopsPath,
@@ -152,74 +145,214 @@ type InitResult struct {
 	SOPSFile      string `json:"sopsFile"`
 }
 
-func createKMSProvider(ctx context.Context) (kms.Provider, error) {
+// validateInitProviderFlags checks that the required CLI flags for the given
+// provider are present, returning a descriptive error if not.
+func validateInitProviderFlags() error {
 	switch kms.ProviderName(initProvider) {
 	case kms.ProviderAWSKMS:
 		if initKeyArn == "" {
-			return nil, fmt.Errorf("--key-arn is required for aws-kms provider")
+			return fmt.Errorf("--key-arn is required for aws-kms provider")
 		}
-		return awskms.NewProvider(awskms.Options{
-			KeyArn: initKeyArn,
-		})
-
 	case kms.ProviderGCPKMS:
 		if initKeyName == "" {
-			return nil, fmt.Errorf("--key-name is required for gcp-kms provider")
+			return fmt.Errorf("--key-name is required for gcp-kms provider")
 		}
-		return gcpkms.NewProvider(gcpkms.Options{
-			KeyName: initKeyName,
-		})
-
 	case kms.ProviderAzureKeyVault:
 		if initVaultURL == "" {
-			return nil, fmt.Errorf("--vault-url is required for azure-keyvault provider")
+			return fmt.Errorf("--vault-url is required for azure-keyvault provider")
 		}
 		if initAzKeyName == "" {
-			return nil, fmt.Errorf("--az-key-name is required for azure-keyvault provider")
+			return fmt.Errorf("--az-key-name is required for azure-keyvault provider")
 		}
-		return azurekv.NewProvider(azurekv.Options{
-			VaultURL:   initVaultURL,
-			KeyName:    initAzKeyName,
-			KeyVersion: initAzKeyVer,
-		})
-
 	case kms.ProviderOCIVault:
 		if initOCIKeyOCID == "" {
-			return nil, fmt.Errorf("--key-ocid is required for oci-vault provider")
+			return fmt.Errorf("--key-ocid is required for oci-vault provider")
 		}
 		if initOCICryptoEP == "" {
-			return nil, fmt.Errorf("--crypto-endpoint is required for oci-vault provider")
+			return fmt.Errorf("--crypto-endpoint is required for oci-vault provider")
 		}
-		return ocivault.NewProvider(ocivault.Options{
-			KeyOCID:        initOCIKeyOCID,
-			CryptoEndpoint: initOCICryptoEP,
-		})
-
-	case kms.ProviderYubiKey:
-		return yubikey.NewProvider(yubikey.Options{
-			Slot:                 yubikey.PIVSlot(initYubiSlot),
-			PublicKeyFingerprint: initYubiFP,
-		})
-
 	case kms.ProviderTPM:
-		pcrs, err := parsePCRs(initTPMPCRs)
-		if err != nil {
-			return nil, fmt.Errorf("invalid PCR selection: %w", err)
+		if _, err := parsePCRs(initTPMPCRs); err != nil {
+			return fmt.Errorf("invalid PCR selection: %w", err)
 		}
-		return tpm.NewProvider(tpm.Options{
-			DevicePath: initTPMDevice,
-			PCRSelection: &tpm.PCRSelection{
-				Hash: tpm.HashSHA256,
-				PCRs: pcrs,
-			},
-		})
-
-	case kms.ProviderMock:
-		return mock.NewProvider(), nil
-
+	case kms.ProviderYubiKey, kms.ProviderMock:
+		// No required flags beyond what cobra enforces.
 	default:
-		return nil, fmt.Errorf("unknown provider: %s", initProvider)
+		return fmt.Errorf("unknown provider: %s", initProvider)
 	}
+	return nil
+}
+
+// bridgeProviderType maps Go CLI provider names to the Rust bridge provider_type
+// identifiers. Providers that the Rust bridge does not support directly
+// (oci-vault, yubikey, tpm) are passed through as-is -- the bridge will
+// return an error if the Rust KMS factory does not recognise them.
+func bridgeProviderType(goProvider string) string {
+	switch kms.ProviderName(goProvider) {
+	case kms.ProviderAWSKMS:
+		return "aws"
+	case kms.ProviderGCPKMS:
+		return "gcp"
+	case kms.ProviderAzureKeyVault:
+		return "azure"
+	case kms.ProviderMock:
+		return "mock"
+	default:
+		// OCI, YubiKey, TPM -- pass through the Go name; the Rust side
+		// will reject unsupported providers with a clear error.
+		return goProvider
+	}
+}
+
+// buildKmsConfigJSON constructs the JSON string expected by the bridge's
+// KMS functions:  {"provider_type":"aws","settings":{...}}
+func buildKmsConfigJSON(provider string) string {
+	settings := buildKmsSettings(provider)
+	cfg := map[string]interface{}{
+		"provider_type": bridgeProviderType(provider),
+		"settings":      settings,
+	}
+	data, _ := json.Marshal(cfg) // settings are built from validated flags; marshal cannot fail
+	return string(data)
+}
+
+// buildKmsSettings returns provider-specific settings derived from CLI flags.
+func buildKmsSettings(provider string) map[string]interface{} {
+	switch kms.ProviderName(provider) {
+	case kms.ProviderAWSKMS:
+		return map[string]interface{}{
+			"key_arn": initKeyArn,
+		}
+	case kms.ProviderGCPKMS:
+		return map[string]interface{}{
+			"key_name": initKeyName,
+		}
+	case kms.ProviderAzureKeyVault:
+		s := map[string]interface{}{
+			"vault_url": initVaultURL,
+			"key_name":  initAzKeyName,
+		}
+		if initAzKeyVer != "" {
+			s["key_version"] = initAzKeyVer
+		}
+		return s
+	case kms.ProviderOCIVault:
+		return map[string]interface{}{
+			"key_ocid":        initOCIKeyOCID,
+			"crypto_endpoint": initOCICryptoEP,
+		}
+	case kms.ProviderYubiKey:
+		return map[string]interface{}{
+			"slot":        initYubiSlot,
+			"fingerprint": initYubiFP,
+		}
+	case kms.ProviderTPM:
+		return map[string]interface{}{
+			"device_path": initTPMDevice,
+			"pcrs":        initTPMPCRs,
+		}
+	default:
+		return map[string]interface{}{}
+	}
+}
+
+// buildGenesisConfigJSON builds the top-level config JSON passed to bridge.New().
+func buildGenesisConfigJSON(provider string) string {
+	cfg := map[string]interface{}{
+		"provider_type":       bridgeProviderType(provider),
+		"provider_config":     buildKmsSettings(provider),
+		"public_key":          nil,
+		"envelope_ciphertext": nil,
+	}
+	data, _ := json.Marshal(cfg)
+	return string(data)
+}
+
+// buildGenesisConfigJSONFromBootstrap constructs the genesis config JSON
+// from a loaded BootstrapConfig, used by verify and rotate commands to
+// reconstitute a bridge handle from a persisted config file.
+func buildGenesisConfigJSONFromBootstrap(cfg *config.BootstrapConfig) string {
+	providerConfig := kmsSettingsFromBootstrapConfig(cfg)
+	gcfg := map[string]interface{}{
+		"provider_type":       bridgeProviderType(string(cfg.Spec.Envelope.Provider)),
+		"provider_config":     providerConfig,
+		"public_key":          nil,
+		"envelope_ciphertext": nil,
+	}
+	data, _ := json.Marshal(gcfg)
+	return string(data)
+}
+
+// buildKmsConfigJSONFromBootstrap constructs the KMS config JSON from a
+// loaded BootstrapConfig.
+func buildKmsConfigJSONFromBootstrap(cfg *config.BootstrapConfig) string {
+	settings := kmsSettingsFromBootstrapConfig(cfg)
+	kmsConfig := map[string]interface{}{
+		"provider_type": bridgeProviderType(string(cfg.Spec.Envelope.Provider)),
+		"settings":      settings,
+	}
+	data, _ := json.Marshal(kmsConfig)
+	return string(data)
+}
+
+// kmsSettingsFromBootstrapConfig extracts provider-specific settings from
+// a BootstrapConfig into a map suitable for bridge JSON serialization.
+func kmsSettingsFromBootstrapConfig(cfg *config.BootstrapConfig) map[string]interface{} {
+	switch cfg.Spec.Envelope.Provider {
+	case kms.ProviderAWSKMS:
+		if cfg.Spec.Envelope.AWSKMS != nil {
+			s := map[string]interface{}{
+				"key_arn": cfg.Spec.Envelope.AWSKMS.KeyArn,
+			}
+			if cfg.Spec.Envelope.AWSKMS.Region != "" {
+				s["region"] = cfg.Spec.Envelope.AWSKMS.Region
+			}
+			return s
+		}
+	case kms.ProviderGCPKMS:
+		if cfg.Spec.Envelope.GCPKMS != nil {
+			return map[string]interface{}{
+				"key_name": cfg.Spec.Envelope.GCPKMS.KeyName,
+			}
+		}
+	case kms.ProviderAzureKeyVault:
+		if cfg.Spec.Envelope.AzureKeyVault != nil {
+			s := map[string]interface{}{
+				"vault_url": cfg.Spec.Envelope.AzureKeyVault.VaultURL,
+				"key_name":  cfg.Spec.Envelope.AzureKeyVault.KeyName,
+			}
+			if cfg.Spec.Envelope.AzureKeyVault.KeyVersion != "" {
+				s["key_version"] = cfg.Spec.Envelope.AzureKeyVault.KeyVersion
+			}
+			return s
+		}
+	case kms.ProviderOCIVault:
+		if cfg.Spec.Envelope.OCIVault != nil {
+			return map[string]interface{}{
+				"key_ocid":        cfg.Spec.Envelope.OCIVault.KeyOCID,
+				"crypto_endpoint": cfg.Spec.Envelope.OCIVault.CryptoEndpoint,
+			}
+		}
+	case kms.ProviderYubiKey:
+		if cfg.Spec.Envelope.YubiKey != nil {
+			return map[string]interface{}{
+				"slot":        cfg.Spec.Envelope.YubiKey.Slot,
+				"fingerprint": cfg.Spec.Envelope.YubiKey.PublicKeyFingerprint,
+			}
+		}
+	case kms.ProviderTPM:
+		if cfg.Spec.Envelope.TPM != nil {
+			s := map[string]interface{}{
+				"device_path": cfg.Spec.Envelope.TPM.DevicePath,
+			}
+			if cfg.Spec.Envelope.TPM.PCRSelection != nil {
+				s["pcr_hash"] = cfg.Spec.Envelope.TPM.PCRSelection.Hash
+				s["pcrs"] = cfg.Spec.Envelope.TPM.PCRSelection.PCRs
+			}
+			return s
+		}
+	}
+	return map[string]interface{}{}
 }
 
 func parsePCRs(s string) ([]int, error) {
@@ -242,7 +375,9 @@ func parsePCRs(s string) ([]int, error) {
 	return pcrs, nil
 }
 
-func buildBootstrapConfig(env *envelope.Envelope) *config.BootstrapConfig {
+// buildBootstrapConfigFromArtifacts creates a BootstrapConfig from bridge
+// PublicArtifacts. The ciphertext is base64-encoded for YAML persistence.
+func buildBootstrapConfigFromArtifacts(artifacts *bridge.PublicArtifacts) *config.BootstrapConfig {
 	cfg := &config.BootstrapConfig{
 		APIVersion: config.APIVersion,
 		Kind:       config.KindBootstrap,
@@ -252,9 +387,9 @@ func buildBootstrapConfig(env *envelope.Envelope) *config.BootstrapConfig {
 		},
 		Spec: config.BootstrapSpec{
 			Envelope: config.EnvelopeSpec{
-				Provider:   env.Provider,
-				PublicKey:  env.PublicKey,
-				Ciphertext: env.CiphertextB64,
+				Provider:   kms.ProviderName(initProvider),
+				PublicKey:  artifacts.PublicKey,
+				Ciphertext: base64.StdEncoding.EncodeToString(artifacts.EnvelopeCiphertext),
 			},
 			Output: config.OutputSpec{
 				SecretName:      "sops-age",

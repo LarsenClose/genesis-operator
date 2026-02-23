@@ -1,5 +1,17 @@
 package main
 
+// unseal.go -- SOPS decryption command.
+//
+// This is the one CLI command that cannot migrate to the bridge
+// (internal/bridge). SOPS requires the age private key as a plaintext
+// string in the SOPS_AGE_KEY environment variable of a subprocess.
+// The bridge's core invariant is "key material never leaves Rust memory",
+// which fundamentally conflicts with passing the key to SOPS via env var.
+//
+// Until SOPS itself gains a plugin/FFI interface that can consume keys
+// without exposing them in process memory, unseal must use envelope.Open()
+// from internal/envelope to retrieve the plaintext private key.
+
 import (
 	"context"
 	"encoding/base64"

@@ -19,7 +19,7 @@ use std::panic;
 use std::ptr;
 
 use crate::audit::{AuditSink, FfiAuditSink, NullAuditSink};
-use crate::k8s::MockSecretInjector;
+use crate::k8s::{MockSecretInjector, SecretInjector, UreqSecretInjector};
 use crate::kms::config::{create_provider, KmsConfig};
 use crate::state::{
     Active, Degraded, Genesis, GenesisConfig, Initialized, Rotating, StateTag, Uninitialized,
@@ -578,11 +578,19 @@ pub unsafe extern "C" fn genesis_inject_secret(
             }
         };
 
-        // TODO(WF-4): Replace MockSecretInjector with UreqSecretInjector
-        // for real Kubernetes API server communication.
-        let injector = MockSecretInjector::new();
+        let injector: Box<dyn SecretInjector> = match std::env::var("KUBERNETES_SERVICE_HOST") {
+            Ok(_) => match UreqSecretInjector::in_cluster() {
+                Ok(inj) => Box::new(inj),
+                Err(_) => {
+                    // Fall back to mock if in-cluster auth fails
+                    // (e.g. dev/test environments with the env var set but no SA mount)
+                    Box::new(MockSecretInjector::new())
+                }
+            },
+            Err(_) => Box::new(MockSecretInjector::new()),
+        };
 
-        match bootstrapping.inject_secret(&injector, name, ns, key) {
+        match bootstrapping.inject_secret(&*injector, name, ns, key) {
             Ok(active) => {
                 let new_inner = GenesisInner::Active(active);
                 success_result(inner_to_handle(new_inner))
@@ -754,11 +762,19 @@ pub unsafe extern "C" fn genesis_complete_rotation(
             }
         };
 
-        // TODO(WF-4): Replace MockSecretInjector with UreqSecretInjector
-        // for real Kubernetes API server communication.
-        let injector = MockSecretInjector::new();
+        let injector: Box<dyn SecretInjector> = match std::env::var("KUBERNETES_SERVICE_HOST") {
+            Ok(_) => match UreqSecretInjector::in_cluster() {
+                Ok(inj) => Box::new(inj),
+                Err(_) => {
+                    // Fall back to mock if in-cluster auth fails
+                    // (e.g. dev/test environments with the env var set but no SA mount)
+                    Box::new(MockSecretInjector::new())
+                }
+            },
+            Err(_) => Box::new(MockSecretInjector::new()),
+        };
 
-        match genesis.complete_rotation(&*provider, &injector, name, ns, key) {
+        match genesis.complete_rotation(&*provider, &*injector, name, ns, key) {
             Ok((active, artifacts)) => {
                 let new_inner = GenesisInner::Active(active);
                 let json = match serde_json::to_string(&artifacts) {

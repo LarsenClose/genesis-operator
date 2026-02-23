@@ -1,21 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 
+	"github.com/larsenclose/genesis/internal/bridge"
 	"github.com/larsenclose/genesis/internal/config"
-	"github.com/larsenclose/genesis/internal/crypto"
-	"github.com/larsenclose/genesis/internal/envelope"
-	"github.com/larsenclose/genesis/internal/kms"
-	"github.com/larsenclose/genesis/internal/kms/awskms"
-	"github.com/larsenclose/genesis/internal/kms/azurekv"
-	"github.com/larsenclose/genesis/internal/kms/gcpkms"
-	"github.com/larsenclose/genesis/internal/kms/mock"
-	"github.com/larsenclose/genesis/internal/kms/ocivault"
-	"github.com/larsenclose/genesis/internal/kms/tpm"
-	"github.com/larsenclose/genesis/internal/kms/yubikey"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +32,6 @@ func init() {
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
 	configPath := args[0]
 
 	verboseLog("Loading config from: %s", configPath)
@@ -57,12 +46,14 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	verboseLog("Creating KMS provider: %s", cfg.Spec.Envelope.Provider)
-	provider, err := createVerifyProvider(ctx, cfg)
+	verboseLog("Creating bridge handle for provider: %s", cfg.Spec.Envelope.Provider)
+	genesisConfigJSON := buildGenesisConfigJSONFromBootstrap(cfg)
+	h, err := bridge.New(genesisConfigJSON)
 	if err != nil {
-		printError(err)
+		printError(fmt.Errorf("failed to create genesis instance: %w", err))
 		return err
 	}
+	defer h.Free()
 
 	verboseLog("Decoding ciphertext...")
 	ciphertext, err := base64.StdEncoding.DecodeString(cfg.Spec.Envelope.Ciphertext)
@@ -71,35 +62,30 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	env := &envelope.Envelope{
-		Provider:   cfg.Spec.Envelope.Provider,
-		PublicKey:  cfg.Spec.Envelope.PublicKey,
-		Ciphertext: ciphertext,
-	}
-
-	verboseLog("Decrypting envelope...")
-	privateKey, err := envelope.Open(ctx, provider, env)
-	if err != nil {
-		printError(fmt.Errorf("failed to decrypt envelope: %w", err))
+	verboseLog("Loading keypair into bridge...")
+	if err := h.Load(cfg.Spec.Envelope.PublicKey, ciphertext); err != nil {
+		printError(fmt.Errorf("failed to load keypair: %w", err))
 		return err
 	}
 
-	keypair, err := crypto.ParseAgeKeypair(privateKey)
+	verboseLog("Verifying envelope via bridge...")
+	kmsConfigJSON := buildKmsConfigJSONFromBootstrap(cfg)
+	vr, err := h.Verify(kmsConfigJSON)
 	if err != nil {
-		printError(fmt.Errorf("decrypted key is invalid: %w", err))
+		printError(fmt.Errorf("failed to verify envelope: %w", err))
 		return err
 	}
 
-	if cfg.Spec.Envelope.PublicKey != "" && keypair.PublicKey != cfg.Spec.Envelope.PublicKey {
+	if !vr.PublicKeyMatches {
 		err := fmt.Errorf("public key mismatch: config has %s but decrypted key has %s",
-			cfg.Spec.Envelope.PublicKey, keypair.PublicKey)
+			cfg.Spec.Envelope.PublicKey, vr.PublicKey)
 		printError(err)
 		return err
 	}
 
 	result := VerifyResult{
 		Valid:     true,
-		PublicKey: keypair.PublicKey,
+		PublicKey: vr.PublicKey,
 		Provider:  string(cfg.Spec.Envelope.Provider),
 	}
 
@@ -121,79 +107,4 @@ type VerifyResult struct {
 	Valid     bool   `json:"valid"`
 	PublicKey string `json:"publicKey"`
 	Provider  string `json:"provider"`
-}
-
-func createVerifyProvider(ctx context.Context, cfg *config.BootstrapConfig) (kms.Provider, error) {
-	switch cfg.Spec.Envelope.Provider {
-	case kms.ProviderAWSKMS:
-		if cfg.Spec.Envelope.AWSKMS == nil {
-			return nil, fmt.Errorf("awsKms configuration missing")
-		}
-		return awskms.NewProvider(awskms.Options{
-			KeyArn: cfg.Spec.Envelope.AWSKMS.KeyArn,
-			Region: cfg.Spec.Envelope.AWSKMS.Region,
-		})
-
-	case kms.ProviderGCPKMS:
-		if cfg.Spec.Envelope.GCPKMS == nil {
-			return nil, fmt.Errorf("gcpKms configuration missing")
-		}
-		return gcpkms.NewProvider(gcpkms.Options{
-			KeyName: cfg.Spec.Envelope.GCPKMS.KeyName,
-		})
-
-	case kms.ProviderAzureKeyVault:
-		if cfg.Spec.Envelope.AzureKeyVault == nil {
-			return nil, fmt.Errorf("azureKeyVault configuration missing")
-		}
-		return azurekv.NewProvider(azurekv.Options{
-			VaultURL:   cfg.Spec.Envelope.AzureKeyVault.VaultURL,
-			KeyName:    cfg.Spec.Envelope.AzureKeyVault.KeyName,
-			KeyVersion: cfg.Spec.Envelope.AzureKeyVault.KeyVersion,
-		})
-
-	case kms.ProviderYubiKey:
-		slot := yubikey.SlotAuthentication
-		fingerprint := ""
-		if cfg.Spec.Envelope.YubiKey != nil {
-			slot = yubikey.PIVSlot(cfg.Spec.Envelope.YubiKey.Slot)
-			fingerprint = cfg.Spec.Envelope.YubiKey.PublicKeyFingerprint
-		}
-		return yubikey.NewProvider(yubikey.Options{
-			Slot:                 slot,
-			PublicKeyFingerprint: fingerprint,
-		})
-
-	case kms.ProviderOCIVault:
-		if cfg.Spec.Envelope.OCIVault == nil {
-			return nil, fmt.Errorf("ociVault configuration missing")
-		}
-		return ocivault.NewProvider(ocivault.Options{
-			KeyOCID:        cfg.Spec.Envelope.OCIVault.KeyOCID,
-			CryptoEndpoint: cfg.Spec.Envelope.OCIVault.CryptoEndpoint,
-		})
-
-	case kms.ProviderTPM:
-		device := "/dev/tpmrm0"
-		var pcrSelection *tpm.PCRSelection
-		if cfg.Spec.Envelope.TPM != nil {
-			device = cfg.Spec.Envelope.TPM.DevicePath
-			if cfg.Spec.Envelope.TPM.PCRSelection != nil {
-				pcrSelection = &tpm.PCRSelection{
-					Hash: tpm.HashAlgorithm(cfg.Spec.Envelope.TPM.PCRSelection.Hash),
-					PCRs: cfg.Spec.Envelope.TPM.PCRSelection.PCRs,
-				}
-			}
-		}
-		return tpm.NewProvider(tpm.Options{
-			DevicePath:   device,
-			PCRSelection: pcrSelection,
-		})
-
-	case kms.ProviderMock:
-		return mock.NewProvider(), nil
-
-	default:
-		return nil, fmt.Errorf("unknown provider: %s", cfg.Spec.Envelope.Provider)
-	}
 }

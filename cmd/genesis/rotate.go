@@ -1,5 +1,18 @@
 package main
 
+// rotate.go -- envelope re-wrapping command.
+//
+// This file cannot fully migrate to the bridge (internal/bridge) because
+// the CLI's "rotate" operation re-wraps the SAME age private key with a
+// different KMS key. The bridge's CompleteRotation() always generates a
+// NEW keypair, which is the correct behavior for the in-cluster operator
+// lifecycle but not for the CLI's envelope re-wrapping use case.
+//
+// The bridge deliberately does not expose raw private key material, so
+// there is no way to extract the old key and re-encrypt it via
+// bridge.Init(). We therefore continue using envelope.Open() +
+// envelope.Create() from internal/envelope here.
+
 import (
 	"context"
 	"encoding/base64"

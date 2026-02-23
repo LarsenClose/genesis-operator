@@ -383,9 +383,11 @@ func (r *GenesisBootstrapReconciler) verifyAttestation(ctx context.Context, boot
 // via Load + Verify. The Go KMS provider performs the actual KMS decryption so
 // the private key can be written to K8s secrets by the Go client.
 //
-// TODO(WF-4): When bridge.InjectSecret uses a real K8s SecretInjector instead
-// of MockSecretInjector, migrate to bridge.BeginBootstrap + bridge.InjectSecret
-// so the private key never crosses the FFI boundary into Go memory.
+// NOTE: The bridge's InjectSecret now uses UreqSecretInjector when running
+// in-cluster (detected via KUBERNETES_SERVICE_HOST). A future iteration can
+// migrate to bridge.BeginBootstrap + bridge.InjectSecret to keep the private
+// key entirely in Rust memory. For now, the Go KMS provider path is retained
+// for compatibility with the existing test suite and multi-namespace support.
 func (r *GenesisBootstrapReconciler) decryptEnvelope(ctx context.Context, provider kms.Provider, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
 	if err != nil {
