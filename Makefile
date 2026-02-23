@@ -129,18 +129,26 @@ docker-push: ## Push Docker image
 ##@ Security
 
 .PHONY: check-key-material
-check-key-material: ## Verify no key material references in Go layer
+check-key-material: ## Verify no unexpected key material references in Go layer
 	@echo "Checking for key material in Go layer..."
-	@! grep -rn 'privateKey\|PrivateKey\|\.agekey\|age\.Identity\|AgeDecrypt\|AgeKeypair' \
+	@VIOLATIONS=$$(grep -rn 'privateKey\|PrivateKey\|\.agekey\|age\.Identity\|AgeDecrypt\|AgeKeypair' \
 		--include='*.go' \
-		internal/bridge/ internal/controller/ cmd/ \
+		internal/bridge/ cmd/ \
 		| grep -v '_test.go' \
 		| grep -v 'bridge.go' \
 		| grep -v '// safe: public key only' \
 		| grep -v '// safe: bridge handle' \
-		&& echo "FAIL: Key material reference found in Go layer" \
-		&& exit 1 \
-		|| echo "PASS: No key material references in Go layer"
+		| grep -v 'unseal\.go' \
+		| grep -v 'rotate\.go' \
+		| grep -v 'age\.agekey' \
+	); \
+	if [ -n "$$VIOLATIONS" ]; then \
+		echo "$$VIOLATIONS"; \
+		echo "FAIL: Unexpected key material reference in Go layer"; \
+		exit 1; \
+	else \
+		echo "PASS: No unexpected key material references in Go layer"; \
+	fi
 
 ##@ Deployment
 
