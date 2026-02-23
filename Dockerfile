@@ -11,8 +11,10 @@ WORKDIR /rust
 # Copy only the Rust crate (cache-friendly layer ordering)
 COPY genesis-core/ .
 
-# Build the static library
-RUN cargo build --release
+# Build the static library (cache mounts for faster rebuilds)
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --release
 
 # Generate C header
 RUN cbindgen --config cbindgen.toml --output genesis_core.h
