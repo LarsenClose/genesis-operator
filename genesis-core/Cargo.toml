@@ -1,0 +1,52 @@
+[package]
+name = "genesis-core"
+version = "0.1.0"
+edition = "2021"
+description = "Cryptographic core for genesis-operator — typestate-enforced key material lifecycle"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Crypto
+age = { version = "0.11", default-features = false, features = ["armor"] }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+hkdf = "0.12"
+sha2 = "0.10"
+
+# PQ (Phase 2, feature-gated)
+pqcrypto-mlkem = { version = "0.1", optional = true }
+pqcrypto-mldsa = { version = "0.1", optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
+
+# KMS clients + HTTP
+ureq = { version = "2", features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# AWS KMS SigV4 signing
+aws-sigv4 = "1"
+aws-credential-types = "1"
+
+# K8s secret injection
+base64 = "0.22"
+
+# FFI
+libc = "0.2"
+
+# Error handling
+thiserror = "2"
+
+[dev-dependencies]
+trybuild = "1.0"
+tempfile = "3"
+
+[features]
+default = []
+pq = ["pqcrypto-mlkem", "pqcrypto-mldsa", "pqcrypto-traits"]
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+codegen-units = 1

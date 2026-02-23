@@ -1,0 +1,17 @@
+error[E0382]: use of moved value: `bootstrapping`
+  --> tests/compile_fail/cannot_inject_twice.rs:27:20
+   |
+19 |     let bootstrapping = initialized.begin_bootstrap(&kms).unwrap();
+   |         ------------- move occurs because `bootstrapping` has type `GenesisBootstrapping`, which does not implement the `Copy` trait
+...
+24 |     let _active = bootstrapping.inject_secret(&injector, "s", "ns", "k").unwrap();
+   |                                 ---------------------------------------- `bootstrapping` moved due to this method call
+...
+27 |     let _active2 = bootstrapping.inject_secret(&injector, "s2", "ns", "k");
+   |                    ^^^^^^^^^^^^^ value used here after move
+   |
+note: `GenesisBootstrapping::inject_secret` takes ownership of the receiver `self`, which moves `bootstrapping`
+  --> src/state.rs
+   |
+   |         mut self,
+   |             ^^^^

@@ -1,0 +1,5 @@
+error[E0599]: no method named `inject_secret` found for struct `Genesis<S>` in the current scope
+  --> tests/compile_fail/cannot_inject_in_initialized.rs:20:25
+   |
+20 |     let _ = initialized.inject_secret(&genesis_core::k8s::MockSecretInjector::new(), "s", "ns", "k");
+   |                         ^^^^^^^^^^^^^ method not found in `Genesis<genesis_core::state::Initialized>`

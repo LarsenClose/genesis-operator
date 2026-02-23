@@ -1,0 +1,5 @@
+error[E0609]: no field `key_material` on type `Genesis<genesis_core::state::Active>`
+  --> tests/compile_fail/cannot_access_key_in_active.rs:25:23
+   |
+25 |     let _km = &active.key_material;
+   |                       ^^^^^^^^^^^^ unknown field

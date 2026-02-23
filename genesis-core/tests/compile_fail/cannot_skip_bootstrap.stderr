@@ -1,0 +1,8 @@
+error[E0599]: no method named `begin_rotation` found for struct `Genesis<genesis_core::state::Initialized>` in the current scope
+  --> tests/compile_fail/cannot_skip_bootstrap.rs:23:33
+   |
+23 |     let _rotating = initialized.begin_rotation();
+   |                                 ^^^^^^^^^^^^^^ method not found in `Genesis<genesis_core::state::Initialized>`
+   |
+   = note: the method was found for
+           - `Genesis<genesis_core::state::Active>`

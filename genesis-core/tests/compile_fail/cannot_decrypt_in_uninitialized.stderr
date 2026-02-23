@@ -1,0 +1,8 @@
+error[E0599]: no method named `unseal` found for struct `Genesis<genesis_core::state::Uninitialized>` in the current scope
+  --> tests/compile_fail/cannot_decrypt_in_uninitialized.rs:17:15
+   |
+17 |     let _ = g.unseal(&genesis_core::kms::NullKmsProvider, b"ciphertext");
+   |               ^^^^^^ method not found in `Genesis<genesis_core::state::Uninitialized>`
+   |
+   = note: the method was found for
+           - `Genesis<genesis_core::state::Initialized>`

@@ -55,6 +55,9 @@ temp/
 # Build cache
 dist/
 
+# Rust build artifacts
+genesis-core/target/
+
 # Claude Code artifacts
 .claude/
 CLAUDE.md
