@@ -22,11 +22,35 @@ jobs:
         with:
           fetch-depth: 0
 
+      # --- Rust: build genesis-core static library ---
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: genesis-core
+
+      - name: Build Rust static library
+        run: cd genesis-core && cargo build --release
+
+      - name: Generate C header
+        run: |
+          cargo install cbindgen
+          cd genesis-core && cbindgen --config cbindgen.toml --output genesis_core.h
+          cp genesis_core.h ../internal/bridge/genesis_core.h
+
+      # --- Go: setup, test, release ---
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Install sops
         run: |
@@ -36,10 +60,9 @@ jobs:
           sudo mv sops /usr/local/bin/
 
       - name: Run tests
-        run: go test -v ./...
+        run: CGO_ENABLED=1 go test -v ./...
 
       - name: Run GoReleaser
-        continue-on-error: true
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -47,6 +70,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Docker: multi-arch image (Dockerfile handles its own Rust build) ---
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -85,6 +110,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+      # --- Supply chain security ---
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.28.0

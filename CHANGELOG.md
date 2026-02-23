@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-22
+
 ### Added
+- **Rust Cryptographic Core (`genesis-core`)**: All key material operations now execute in a Rust
+  static library linked into Go via CGO, eliminating private key exposure in the Go memory space
+  - Age X25519 keypair generation (Rust-native)
+  - Envelope seal/unseal via Rust-side age encryption
+  - C FFI bridge with cbindgen-generated headers
+  - Go bridge layer (`internal/bridge/`) provides safe Go-callable interface
 - **OCI Vault Provider**: Full envelope encryption/decryption support for Oracle Cloud Infrastructure Vault
   - Uses OCI KMS crypto endpoints for encrypt/decrypt operations
   - Supports Instance Principal authentication for OKE workloads
@@ -17,7 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced KMS registry documentation
 
 ### Changed
+- Build now requires CGO (`CGO_ENABLED=1`) due to Rust static library linkage
+- Release pipeline produces Docker images (multi-arch linux/amd64 + linux/arm64) as the primary
+  distribution; standalone binary is linux/amd64 only (cross-platform binaries deferred to a
+  future release with cargo-zigbuild)
+- 3-stage Dockerfile: Rust build, Go build (with CGO), distroless runtime
+- CI pipeline restructured: Rust job builds static library and uploads as artifact;
+  Go test/lint/build/security jobs consume the artifact
 - Updated Dockerfile to use Go 1.24
+
+### Security
+- Private key material never enters Go heap -- all cryptographic operations execute in Rust
+- `make check-key-material` gate verifies no unexpected key references leak into Go layer
 
 ## [0.2.0] - 2026-01-27
 
@@ -74,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AWS KMS integration prototype
 - CLI scaffolding with Cobra
 
-[Unreleased]: https://github.com/larsenclose/genesis/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/larsenclose/genesis/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/larsenclose/genesis/releases/tag/v0.1.0
+[Unreleased]: https://github.com/larsenclose/genesis-operator/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/larsenclose/genesis-operator/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/larsenclose/genesis-operator/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/larsenclose/genesis-operator/releases/tag/v0.1.0
