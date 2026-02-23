@@ -43,13 +43,17 @@ jobs:
           cargo install cbindgen
           cd genesis-core && cbindgen --config cbindgen.toml --output genesis_core.h
 
+      - name: Stage Rust artifacts
+        run: |
+          mkdir -p rust-artifacts
+          cp genesis-core/target/release/libgenesis_core.a rust-artifacts/
+          cp genesis-core/genesis_core.h rust-artifacts/
+
       - name: Upload Rust artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rust-artifacts
-          path: |
-            genesis-core/target/release/libgenesis_core.a
-            genesis-core/genesis_core.h
+          path: rust-artifacts/
 
   test:
     name: Test
@@ -73,8 +77,8 @@ jobs:
       - name: Install Rust library
         run: |
           mkdir -p genesis-core/target/release
-          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
-          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+          cp rust-artifacts/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis_core.h internal/bridge/genesis_core.h
 
       - name: Install C toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc
@@ -134,8 +138,8 @@ jobs:
       - name: Install Rust library
         run: |
           mkdir -p genesis-core/target/release
-          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
-          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+          cp rust-artifacts/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis_core.h internal/bridge/genesis_core.h
 
       - name: Install C toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc
@@ -172,8 +176,8 @@ jobs:
       - name: Install Rust library
         run: |
           mkdir -p genesis-core/target/release
-          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
-          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+          cp rust-artifacts/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis_core.h internal/bridge/genesis_core.h
 
       - name: Install C toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc
@@ -206,8 +210,8 @@ jobs:
       - name: Install Rust library
         run: |
           mkdir -p genesis-core/target/release
-          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
-          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+          cp rust-artifacts/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis_core.h internal/bridge/genesis_core.h
 
       - name: Install C toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc
