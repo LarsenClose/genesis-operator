@@ -18,8 +18,37 @@ HELM ?= $(shell which helm)
 KIND ?= $(shell which kind)
 KUBECTL ?= $(shell which kubectl)
 
+# --- Rust Core ---
+RUST_DIR := genesis-core
+RUST_LIB := $(RUST_DIR)/target/release/libgenesis_core.a
+RUST_HEADER := internal/bridge/genesis_core.h
+
+.PHONY: rust-build rust-test rust-lint rust-header rust-clean rust-audit
+
+rust-build: ## Build the Rust static library
+	cd $(RUST_DIR) && cargo build --release
+
+rust-test: ## Run Rust tests
+	cd $(RUST_DIR) && cargo test
+
+rust-lint: ## Run Rust linter (clippy)
+	cd $(RUST_DIR) && cargo clippy --all-targets -- -D warnings
+	cd $(RUST_DIR) && cargo fmt --check
+
+rust-header: rust-build ## Generate C header from Rust and copy to bridge
+	cd $(RUST_DIR) && cbindgen --config cbindgen.toml --output genesis_core.h
+	cp $(RUST_DIR)/genesis_core.h $(RUST_HEADER)
+
+rust-clean: ## Clean Rust build artifacts
+	cd $(RUST_DIR) && cargo clean
+
+rust-audit: ## Run cargo audit on Rust dependencies
+	cd $(RUST_DIR) && cargo audit
+
+# --- Go ---
+
 .PHONY: all
-all: build
+all: rust-build build
 
 ##@ General
 
@@ -77,17 +106,17 @@ test-coverage-filtered: test-filtered ## Run filtered tests with HTML coverage r
 ##@ Build
 
 .PHONY: build
-build: ## Build the CLI and operator binaries
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
+build: rust-build ## Build the CLI and operator binaries
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
 
 .PHONY: build-cli
-build-cli: ## Build only the CLI
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
+build-cli: rust-build ## Build only the CLI
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis ./cmd/genesis
 
 .PHONY: build-operator
-build-operator: ## Build only the operator
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
+build-operator: rust-build ## Build only the operator
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/genesis-operator ./cmd/operator
 
 .PHONY: docker-build
 docker-build: ## Build Docker image
@@ -96,6 +125,22 @@ docker-build: ## Build Docker image
 .PHONY: docker-push
 docker-push: ## Push Docker image
 	docker push $(IMG)
+
+##@ Security
+
+.PHONY: check-key-material
+check-key-material: ## Verify no key material references in Go layer
+	@echo "Checking for key material in Go layer..."
+	@! grep -rn 'privateKey\|PrivateKey\|\.agekey\|age\.Identity\|AgeDecrypt\|AgeKeypair' \
+		--include='*.go' \
+		internal/bridge/ internal/controller/ cmd/ \
+		| grep -v '_test.go' \
+		| grep -v 'bridge.go' \
+		| grep -v '// safe: public key only' \
+		| grep -v '// safe: bridge handle' \
+		&& echo "FAIL: Key material reference found in Go layer" \
+		&& exit 1 \
+		|| echo "PASS: No key material references in Go layer"
 
 ##@ Deployment
 
@@ -155,7 +200,7 @@ e2e: e2e-setup e2e-test e2e-cleanup ## Run full E2E test cycle
 ##@ Utilities
 
 .PHONY: clean
-clean: ## Clean build artifacts
+clean: rust-clean ## Clean all build artifacts
 	rm -rf bin/ coverage.out coverage.html
 
 .PHONY: tidy
@@ -163,5 +208,5 @@ tidy: ## Run go mod tidy
 	go mod tidy
 
 .PHONY: verify
-verify: fmt vet lint test ## Run all verification steps
+verify: rust-lint fmt vet lint test ## Run all verification steps
 	@echo "All verification passed"

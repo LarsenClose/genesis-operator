@@ -10,9 +10,51 @@ permissions:
   contents: read
 
 jobs:
+  rust:
+    name: Rust Core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: genesis-core
+
+      - name: Check formatting
+        run: cd genesis-core && cargo fmt --check
+
+      - name: Clippy
+        run: cd genesis-core && cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cd genesis-core && cargo test
+
+      - name: Build release
+        run: cd genesis-core && cargo build --release
+
+      - name: Generate header
+        run: |
+          cargo install cbindgen
+          cd genesis-core && cbindgen --config cbindgen.toml --output genesis_core.h
+
+      - name: Upload Rust artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-artifacts
+          path: |
+            genesis-core/target/release/libgenesis_core.a
+            genesis-core/genesis_core.h
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +63,21 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-artifacts
+          path: rust-artifacts
+
+      - name: Install Rust library
+        run: |
+          mkdir -p genesis-core/target/release
+          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Verify go mod tidy
         run: |
@@ -35,13 +92,13 @@ jobs:
           sudo mv sops /usr/local/bin/
 
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: CGO_ENABLED=1 go test -v -race -coverprofile=coverage.out ./...
 
       - name: Generate filtered coverage (exclude generated code)
         run: |
           # Exclude auto-generated code from coverage reporting
           COVERAGE_PACKAGES=$(go list ./... | grep -v -E "(pkg/api/v1alpha1|cmd/operator|internal/kms/mock)$")
-          go test $COVERAGE_PACKAGES -coverprofile=coverage-filtered.out
+          CGO_ENABLED=1 go test $COVERAGE_PACKAGES -coverprofile=coverage-filtered.out
           echo "### Coverage Report (Production Code Only)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           go tool cover -func=coverage-filtered.out | tail -1 >> $GITHUB_STEP_SUMMARY
@@ -58,6 +115,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
 
@@ -66,15 +124,36 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-artifacts
+          path: rust-artifacts
+
+      - name: Install Rust library
+        run: |
+          mkdir -p genesis-core/target/release
+          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+        env:
+          CGO_ENABLED: "1"
+
+      - name: Check key material containment
+        run: make check-key-material
 
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
 
@@ -84,15 +163,31 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-artifacts
+          path: rust-artifacts
+
+      - name: Install Rust library
+        run: |
+          mkdir -p genesis-core/target/release
+          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
       - name: Build CLI
-        run: go build -v ./cmd/genesis
+        run: CGO_ENABLED=1 go build -v ./cmd/genesis
 
       - name: Build Operator
-        run: go build -v ./cmd/operator
+        run: CGO_ENABLED=1 go build -v ./cmd/operator
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
 
@@ -102,15 +197,30 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-artifacts
+          path: rust-artifacts
+
+      - name: Install Rust library
+        run: |
+          mkdir -p genesis-core/target/release
+          cp rust-artifacts/genesis-core/target/release/libgenesis_core.a genesis-core/target/release/
+          cp rust-artifacts/genesis-core/genesis_core.h internal/bridge/genesis_core.h
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
       - name: Run govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          CGO_ENABLED=1 govulncheck ./...
 
       - name: Run gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -exclude-generated ./...
+          CGO_ENABLED=1 gosec -exclude-generated ./...
 
   helm:
     name: Helm Lint

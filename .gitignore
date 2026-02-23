@@ -66,3 +66,4 @@ CLAUDE.md
 coverage-audit.out
 test-coverage-summary.out
 .coverage-config-summary.md
+/operator

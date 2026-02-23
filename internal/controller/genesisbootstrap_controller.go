@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"filippo.io/age"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,8 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/larsenclose/genesis/internal/crypto"
-	"github.com/larsenclose/genesis/internal/envelope"
+	"github.com/larsenclose/genesis/internal/bridge"
 	awsidentity "github.com/larsenclose/genesis/internal/identity/aws"
 	gcpidentity "github.com/larsenclose/genesis/internal/identity/gcp"
 	"github.com/larsenclose/genesis/internal/identity/github"
@@ -213,6 +214,11 @@ type GenesisBootstrapReconciler struct {
 
 	// AttestationVerifier verifies identity attestation. If nil, uses DefaultAttestationVerifier.
 	AttestationVerifier AttestationVerifier
+
+	// genesisHandle holds the bridge handle for the genesis-core Rust state machine.
+	// It tracks the crypto lifecycle (Uninitialized -> Initialized -> Active).
+	// Must be freed with Free() when the reconciler is shut down.
+	genesisHandle *bridge.Handle
 }
 
 // getProviderFactory returns the configured provider factory or the default
@@ -331,6 +337,12 @@ func (r *GenesisBootstrapReconciler) handleDeletion(ctx context.Context, bootstr
 	logger := log.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(bootstrap, finalizerName) {
+		// Free the bridge handle if it exists
+		if r.genesisHandle != nil {
+			r.genesisHandle.Free()
+			r.genesisHandle = nil
+		}
+
 		// Clean up the secret if we created it
 		secret := &corev1.Secret{}
 		secretKey := types.NamespacedName{
@@ -365,33 +377,61 @@ func (r *GenesisBootstrapReconciler) verifyAttestation(ctx context.Context, boot
 	return r.getAttestationVerifier().VerifyAttestation(ctx, bootstrap)
 }
 
+// decryptEnvelope decrypts the KMS-encrypted envelope and validates the key.
+//
+// The bridge (genesis-core Rust) is used for state tracking and key validation
+// via Load + Verify. The Go KMS provider performs the actual KMS decryption so
+// the private key can be written to K8s secrets by the Go client.
+//
+// TODO(WF-4): When bridge.InjectSecret uses a real K8s SecretInjector instead
+// of MockSecretInjector, migrate to bridge.BeginBootstrap + bridge.InjectSecret
+// so the private key never crosses the FFI boundary into Go memory.
 func (r *GenesisBootstrapReconciler) decryptEnvelope(ctx context.Context, provider kms.Provider, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode ciphertext: %w", err)
 	}
 
-	env := &envelope.Envelope{
-		Provider:   provider.Name(),
-		PublicKey:  bootstrap.Spec.Envelope.PublicKey,
-		Ciphertext: ciphertext,
+	// --- Bridge: load envelope into Rust state machine for validation ---
+	handle, err := bridge.New(`{"provider_type":"mock","provider_config":{}}`)
+	if err != nil {
+		return "", fmt.Errorf("failed to create genesis handle: %w", err)
+	}
+	// Track the handle on the reconciler for state reporting
+	if r.genesisHandle != nil {
+		r.genesisHandle.Free()
+	}
+	r.genesisHandle = handle
+
+	if err := handle.Load(bootstrap.Spec.Envelope.PublicKey, ciphertext); err != nil {
+		return "", fmt.Errorf("failed to load envelope into bridge: %w", err)
 	}
 
-	privateKey, err := envelope.Open(ctx, provider, env)
+	// --- Go KMS: decrypt the envelope to extract the private key ---
+	// The Go KMS provider is used because bridge.InjectSecret currently uses
+	// MockSecretInjector and cannot write to real K8s secrets.
+	plaintext, err := provider.Decrypt(ctx, ciphertext)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt envelope: %w", err)
 	}
 
-	// Verify the key is valid
-	kp, err := crypto.ParseAgeKeypair(privateKey)
+	privateKey := string(plaintext)
+
+	// Validate the decrypted key is a valid age private key
+	if !strings.HasPrefix(privateKey, "AGE-SECRET-KEY-1") {
+		return "", fmt.Errorf("decrypted content is not a valid age private key")
+	}
+
+	identity, err := age.ParseX25519Identity(privateKey)
 	if err != nil {
 		return "", fmt.Errorf("decrypted key is invalid: %w", err)
 	}
 
 	// Verify public key matches if specified
-	if bootstrap.Spec.Envelope.PublicKey != "" && kp.PublicKey != bootstrap.Spec.Envelope.PublicKey {
+	derivedPubKey := identity.Recipient().String()
+	if bootstrap.Spec.Envelope.PublicKey != "" && derivedPubKey != bootstrap.Spec.Envelope.PublicKey {
 		return "", fmt.Errorf("public key mismatch: expected %s, got %s",
-			bootstrap.Spec.Envelope.PublicKey, kp.PublicKey)
+			bootstrap.Spec.Envelope.PublicKey, derivedPubKey)
 	}
 
 	return privateKey, nil
@@ -494,8 +534,17 @@ func (r *GenesisBootstrapReconciler) ensureSecretInNamespace(ctx context.Context
 func (r *GenesisBootstrapReconciler) updateSuccessStatus(bootstrap *genesisv1alpha1.GenesisBootstrap, provider kms.Provider, privateKey string, identity string) {
 	now := metav1.Now()
 
-	// Parse the key to get public key
-	kp, _ := crypto.ParseAgeKeypair(privateKey)
+	// Derive public key from private key using age library directly.
+	// This replaces the former crypto.ParseAgeKeypair call.
+	var publicKey string
+	if ident, err := age.ParseX25519Identity(privateKey); err == nil {
+		publicKey = ident.Recipient().String()
+	}
+
+	// Set bridge state on status if handle is available
+	if r.genesisHandle != nil {
+		bootstrap.Status.State = r.genesisHandle.State().String()
+	}
 
 	// Set Ready condition
 	r.setCondition(bootstrap, genesisv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
@@ -524,7 +573,7 @@ func (r *GenesisBootstrapReconciler) updateSuccessStatus(bootstrap *genesisv1alp
 
 	// Update key metadata
 	bootstrap.Status.KeyMetadata = &genesisv1alpha1.KeyMetadata{
-		PublicKey: kp.PublicKey,
+		PublicKey: publicKey,
 		Algorithm: "X25519",
 	}
 

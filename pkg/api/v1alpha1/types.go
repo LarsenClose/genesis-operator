@@ -246,6 +246,10 @@ type OutputSpec struct {
 
 // GenesisBootstrapStatus defines the observed state of GenesisBootstrap
 type GenesisBootstrapStatus struct {
+	// State is the current genesis-core state machine state (e.g., Uninitialized, Initialized, Active)
+	// +optional
+	State string `json:"state,omitempty"`
+
 	// Conditions represent the latest available observations of the resource's state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -419,6 +423,10 @@ type SecretKeySelector struct {
 
 // GenesisRotationPolicyStatus defines the observed state of GenesisRotationPolicy
 type GenesisRotationPolicyStatus struct {
+	// State is the current genesis-core state machine state (e.g., Active, Rotating)
+	// +optional
+	State string `json:"state,omitempty"`
+
 	// Conditions represent the latest available observations of the resource's state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
