@@ -24,8 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable operator logging mode (production vs development)
 - Enhanced KMS registry documentation
 
-### Changed
+### Breaking Changes
 - Build now requires CGO (`CGO_ENABLED=1`) due to Rust static library linkage
+- `go install` no longer works without pre-built Rust artifacts; use `make build-cli` or Docker
+- Standalone binary releases are linux/amd64 only; arm64 is available via Docker image (multi-arch)
+
+### Changed
 - Release pipeline produces Docker images (multi-arch linux/amd64 + linux/arm64) as the primary
   distribution; standalone binary is linux/amd64 only (cross-platform binaries deferred to a
   future release with cargo-zigbuild)

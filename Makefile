@@ -73,7 +73,7 @@ vet: ## Run go vet
 	go vet ./...
 
 .PHONY: lint
-lint: ## Run linters
+lint: rust-lint ## Run linters
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 		golangci-lint run; \
 	else \
@@ -85,7 +85,7 @@ COVERAGE_EXCLUDE_PATTERN := "(pkg/api/v1alpha1|cmd/operator|internal/kms/mock)$$
 COVERAGE_PACKAGES := $(shell go list ./... | grep -v -E $(COVERAGE_EXCLUDE_PATTERN))
 
 .PHONY: test
-test: ## Run unit tests
+test: rust-test ## Run unit tests
 	go test ./... -v -coverprofile=coverage.out
 
 .PHONY: test-coverage
@@ -129,6 +129,10 @@ docker-push: ## Push Docker image
 ##@ Security
 
 .PHONY: check-key-material
+# TODO(task-1.3): The first grep below only scans internal/bridge/ and cmd/.
+# After controller migration completes, widen to all of internal/ with only
+# the documented exceptions (bridge.go, unseal.go, rotate.go). Currently
+# scoped narrowly because internal/controller/ legitimately uses crypto.
 check-key-material: ## Verify no unexpected key material references in Go layer
 	@echo "Checking for key material in Go layer..."
 	@VIOLATIONS=$$(grep -rn 'privateKey\|PrivateKey\|\.agekey\|age\.Identity\|AgeDecrypt\|AgeKeypair' \
@@ -149,6 +153,23 @@ check-key-material: ## Verify no unexpected key material references in Go layer
 	else \
 		echo "PASS: No unexpected key material references in Go layer"; \
 	fi
+	@echo "Checking for unauthorized crypto/envelope package imports..."
+	@IMPORT_VIOLATIONS=$$(grep -rn '"github.com/larsenclose/genesis/internal/crypto\|"github.com/larsenclose/genesis/internal/envelope' \
+		internal/ cmd/ \
+		--include="*.go" \
+		| grep -v '_test.go' \
+		| grep -v 'bridge.go' \
+		| grep -v 'unseal.go' \
+		| grep -v 'rotate.go' \
+		| grep -v 'internal/crypto/' \
+		| grep -v 'internal/envelope/' \
+		|| true); \
+	if [ -n "$$IMPORT_VIOLATIONS" ]; then \
+		echo "FAIL: Unauthorized crypto/envelope imports found:"; \
+		echo "$$IMPORT_VIOLATIONS"; \
+		exit 1; \
+	fi
+	@echo "No unauthorized imports found."
 
 ##@ Deployment
 
@@ -216,5 +237,5 @@ tidy: ## Run go mod tidy
 	go mod tidy
 
 .PHONY: verify
-verify: rust-lint fmt vet lint test ## Run all verification steps
+verify: rust-lint rust-test fmt vet lint test ## Run all verification steps
 	@echo "All verification passed"

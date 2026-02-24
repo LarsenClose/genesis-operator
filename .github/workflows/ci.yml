@@ -35,8 +35,27 @@ jobs:
       - name: Test
         run: cd genesis-core && cargo test
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit Rust dependencies
+        run: cd genesis-core && cargo audit
+
       - name: Build release
-        run: cd genesis-core && cargo build --release
+        run: cd genesis-core && cargo build --release --features mock
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Rust coverage
+        run: cd genesis-core && cargo tarpaulin --out xml --skip-clean
+
+      - name: Upload Rust coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: genesis-core/cobertura.xml
+          flags: rust
+          fail_ci_if_error: false
 
       - name: Generate header
         run: |
@@ -288,7 +307,7 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     needs: [build, docker]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 

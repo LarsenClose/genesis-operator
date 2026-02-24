@@ -50,6 +50,9 @@ pub enum AuditEvent {
     },
     AbortRotation,
     RecoverFromDegraded,
+    Warning {
+        message: String,
+    },
 }
 
 impl AuditEvent {

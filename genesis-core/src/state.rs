@@ -370,6 +370,16 @@ impl GenesisBootstrapping {
         })
     }
 
+    /// Emit an audit event through the inner state machine's audit sink.
+    ///
+    /// Useful for FFI callers that need to log warnings before calling
+    /// `inject_secret` (e.g. mock injector fallback in debug builds).
+    pub fn emit_audit(&self, event: AuditEvent) {
+        if let Some(ref inner) = self.inner {
+            inner.audit.emit(event);
+        }
+    }
+
     /// Abort the bootstrap and return to `Initialized` without injecting
     /// any secret.  Key material is zeroed on drop.
     pub fn abort(mut self) -> Genesis<Initialized> {
@@ -492,7 +502,12 @@ impl Genesis<Rotating> {
 // -- Degraded ─────────────────────────────────────────────────────────
 
 impl Genesis<Degraded> {
-    /// Attempt recovery from a degraded state.
+    /// Transitions from Degraded back to Active by verifying KMS connectivity.
+    ///
+    /// Design decision: Degraded transitions directly to Active (not Bootstrapping)
+    /// because the secret was already injected before degradation occurred.
+    /// Re-bootstrapping would be unnecessary -- we only need to confirm the system
+    /// can still decrypt the envelope via KMS.
     ///
     /// Verifies that the KMS can still decrypt the envelope and, if
     /// successful, transitions to `Active`.

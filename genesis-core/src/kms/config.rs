@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::GenesisError;
 
+#[cfg(any(test, feature = "mock"))]
 use super::mock::MockKmsProvider;
 use super::KmsProvider;
 
@@ -31,7 +32,12 @@ pub struct KmsConfig {
 /// Supported provider types: `"mock"`, `"aws"`, `"gcp"`, `"azure"`.
 pub fn create_provider(config: &KmsConfig) -> Result<Box<dyn KmsProvider>, GenesisError> {
     match config.provider_type.as_str() {
+        #[cfg(any(test, feature = "mock"))]
         "mock" => Ok(Box::new(MockKmsProvider::new())),
+        #[cfg(any(test, feature = "mock"))]
+        "null" => Ok(Box::new(super::NullKmsProvider)),
+        #[cfg(not(any(test, feature = "mock")))]
+        "mock" | "null" => Err(GenesisError::KmsNotConfigured),
         "aws" => Ok(Box::new(super::aws::AwsKmsProvider::from_env()?)),
         "gcp" => Ok(Box::new(super::gcp::GcpKmsProvider::from_env()?)),
         "azure" => Ok(Box::new(super::azure::AzureKeyVaultProvider::from_env()?)),

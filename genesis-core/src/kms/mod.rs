@@ -9,6 +9,7 @@ pub mod aws;
 pub mod azure;
 pub mod config;
 pub mod gcp;
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
 use crate::GenesisError;
@@ -39,8 +40,10 @@ pub trait KmsProvider: Send + Sync {
 /// A no-op KMS provider for testing that returns plaintext unchanged.
 ///
 /// **Never use in production** -- this provides zero encryption.
+#[cfg(any(test, feature = "mock"))]
 pub struct NullKmsProvider;
 
+#[cfg(any(test, feature = "mock"))]
 impl KmsProvider for NullKmsProvider {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, GenesisError> {
         Ok(plaintext.to_vec())

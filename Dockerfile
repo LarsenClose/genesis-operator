@@ -1,5 +1,10 @@
+# Version defaults -- keep in sync with rust-toolchain.toml and go.mod
+# Override at build time: docker build --build-arg RUST_VERSION=1.93 ...
+ARG RUST_VERSION=1.92
+ARG GO_VERSION=1.24
+
 # Stage 1: Rust build
-FROM --platform=$TARGETPLATFORM rust:1.92-alpine AS rust-builder
+FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-alpine AS rust-builder
 
 RUN apk add --no-cache musl-dev perl make
 
@@ -20,7 +25,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN cbindgen --config cbindgen.toml --output genesis_core.h
 
 # Stage 2: Go build
-FROM --platform=$TARGETPLATFORM golang:1.24-alpine AS go-builder
+ARG GO_VERSION
+FROM --platform=$TARGETPLATFORM golang:${GO_VERSION}-alpine AS go-builder
 
 ARG TARGETARCH
 

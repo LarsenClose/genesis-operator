@@ -18,8 +18,12 @@ use std::os::raw::c_char;
 use std::panic;
 use std::ptr;
 
+#[cfg(feature = "mock")]
+use crate::audit::AuditEvent;
 use crate::audit::{AuditSink, FfiAuditSink, NullAuditSink};
-use crate::k8s::{MockSecretInjector, SecretInjector, UreqSecretInjector};
+#[cfg(feature = "mock")]
+use crate::k8s::MockSecretInjector;
+use crate::k8s::{SecretInjector, UreqSecretInjector};
 use crate::kms::config::{create_provider, KmsConfig};
 use crate::state::{
     Active, Degraded, Genesis, GenesisConfig, Initialized, Rotating, StateTag, Uninitialized,
@@ -581,13 +585,49 @@ pub unsafe extern "C" fn genesis_inject_secret(
         let injector: Box<dyn SecretInjector> = match std::env::var("KUBERNETES_SERVICE_HOST") {
             Ok(_) => match UreqSecretInjector::in_cluster() {
                 Ok(inj) => Box::new(inj),
-                Err(_) => {
-                    // Fall back to mock if in-cluster auth fails
-                    // (e.g. dev/test environments with the env var set but no SA mount)
-                    Box::new(MockSecretInjector::new())
+                Err(e) => {
+                    #[cfg(feature = "mock")]
+                    {
+                        // Debug builds: fall back to mock with a warning.
+                        bootstrapping.emit_audit(AuditEvent::Warning {
+                            message: format!(
+                                "using mock secret injector (in-cluster auth failed: {e})"
+                            ),
+                        });
+                        Box::new(MockSecretInjector::new())
+                    }
+                    #[cfg(not(feature = "mock"))]
+                    {
+                        let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                        return error_with_handle(
+                            400,
+                            &format!("in-cluster authentication failed: {e}"),
+                            handle,
+                        );
+                    }
                 }
             },
-            Err(_) => Box::new(MockSecretInjector::new()),
+            Err(_) => {
+                #[cfg(feature = "mock")]
+                {
+                    // Debug builds: fall back to mock with a warning.
+                    bootstrapping.emit_audit(AuditEvent::Warning {
+                        message:
+                            "WARNING: using mock secret injector (KUBERNETES_SERVICE_HOST not set)"
+                                .to_string(),
+                    });
+                    Box::new(MockSecretInjector::new())
+                }
+                #[cfg(not(feature = "mock"))]
+                {
+                    let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                    return error_with_handle(
+                        400,
+                        "in-cluster authentication required (KUBERNETES_SERVICE_HOST not set)",
+                        handle,
+                    );
+                }
+            }
         };
 
         match bootstrapping.inject_secret(&*injector, name, ns, key) {
@@ -765,13 +805,45 @@ pub unsafe extern "C" fn genesis_complete_rotation(
         let injector: Box<dyn SecretInjector> = match std::env::var("KUBERNETES_SERVICE_HOST") {
             Ok(_) => match UreqSecretInjector::in_cluster() {
                 Ok(inj) => Box::new(inj),
-                Err(_) => {
-                    // Fall back to mock if in-cluster auth fails
-                    // (e.g. dev/test environments with the env var set but no SA mount)
-                    Box::new(MockSecretInjector::new())
+                Err(e) => {
+                    #[cfg(feature = "mock")]
+                    {
+                        // Debug builds: fall back to mock with a warning via eprintln
+                        // (no audit sink accessible from Rotating state in FFI).
+                        eprintln!(
+                            "WARNING: using mock secret injector (in-cluster auth failed: {e})"
+                        );
+                        Box::new(MockSecretInjector::new())
+                    }
+                    #[cfg(not(feature = "mock"))]
+                    {
+                        let handle = inner_to_handle(GenesisInner::Rotating(genesis));
+                        return error_with_handle(
+                            400,
+                            &format!("in-cluster authentication failed: {e}"),
+                            handle,
+                        );
+                    }
                 }
             },
-            Err(_) => Box::new(MockSecretInjector::new()),
+            Err(_) => {
+                #[cfg(feature = "mock")]
+                {
+                    eprintln!(
+                        "WARNING: using mock secret injector (KUBERNETES_SERVICE_HOST not set)"
+                    );
+                    Box::new(MockSecretInjector::new())
+                }
+                #[cfg(not(feature = "mock"))]
+                {
+                    let handle = inner_to_handle(GenesisInner::Rotating(genesis));
+                    return error_with_handle(
+                        400,
+                        "in-cluster authentication required (KUBERNETES_SERVICE_HOST not set)",
+                        handle,
+                    );
+                }
+            }
         };
 
         match genesis.complete_rotation(&*provider, &*injector, name, ns, key) {

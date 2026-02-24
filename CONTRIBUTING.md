@@ -11,6 +11,8 @@ This project adheres to a code of conduct. By participating, you are expected to
 ### Prerequisites
 
 - Go 1.24 or later
+- Rust toolchain (see `rust-toolchain.toml`) and `cbindgen`
+- `CGO_ENABLED=1` (required for Rust static library linkage)
 - Docker (for building container images)
 - Helm 3.x (for Kubernetes deployment)
 - kubectl (for testing with Kubernetes)
@@ -123,8 +125,10 @@ genesis/
 ├── cmd/
 │   ├── genesis/     # CLI application
 │   └── operator/    # Kubernetes operator
+├── genesis-core/    # Rust static library (typestate machine, KeyMaterial, KMS, FFI)
 ├── internal/
 │   ├── audit/       # Audit logging
+│   ├── bridge/      # Go CGO bridge to genesis-core
 │   ├── config/      # Configuration management
 │   ├── controller/  # Kubernetes controllers
 │   ├── crypto/      # Age encryption

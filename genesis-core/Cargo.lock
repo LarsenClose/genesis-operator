@@ -633,12 +633,13 @@ dependencies = [
 
 [[package]]
 name = "genesis-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "age",
  "aws-credential-types",
  "aws-sigv4",
  "base64 0.22.1",
+ "genesis-core",
  "hkdf",
  "libc",
  "pqcrypto-mldsa",

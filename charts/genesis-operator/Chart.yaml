@@ -2,8 +2,8 @@ apiVersion: v2
 name: genesis-operator
 description: A Helm chart for the Genesis GitOps Secrets Bootstrap Operator
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.3.0"
 keywords:
   - secrets
   - gitops

@@ -1,6 +1,6 @@
 # Genesis
 
-[![CI](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/LarsenClose/genesis-operator)](https://goreportcard.com/report/github.com/LarsenClose/genesis-operator) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/LarsenClose/genesis-operator/actions/workflows/ci.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/LarsenClose/genesis-operator)](https://goreportcard.com/report/github.com/LarsenClose/genesis-operator) [![codecov](https://codecov.io/gh/LarsenClose/genesis-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/LarsenClose/genesis-operator) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Universal GitOps Secrets Bootstrap**
 
@@ -14,18 +14,17 @@ Genesis provides a single, identity-based bootstrap mechanism that works across 
 - **Identity-Based Access**: Clusters prove identity cryptographically via OIDC/IRSA/Workload Identity/Instance Principal, not pre-shared secrets
 - **GitOps Native**: All configuration lives in git, operator is fully declarative
 - **Multi-Cloud Support**: AWS KMS, GCP Cloud KMS, Azure Key Vault, OCI Vault
-- **Bare-Metal Support**: YubiKey PIV and TPM 2.0 for air-gapped environments
+- **Bare-Metal Support**: YubiKey PIV and TPM 2.0 interfaces (requires external provider libraries)
 - **SOPS Integration**: Works seamlessly with existing SOPS workflows and Flux
 
 ## Installation
 
 ### CLI
 
-```bash
-# From source
-go install github.com/larsenclose/genesis/cmd/genesis@latest
+> **Note:** Building from source requires the Rust toolchain (see `rust-toolchain.toml`) and CGO.
+> `go install` does not work without pre-built Rust artifacts. Use `make build-cli` for the recommended build path.
 
-# Or build locally
+```bash
 git clone https://github.com/larsenclose/genesis
 cd genesis
 make build-cli
@@ -182,6 +181,26 @@ Use `genesis <command> --help` for detailed usage.
 │  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Security Architecture
+
+Genesis Operator enforces a strict security boundary: **all key material operations execute in a Rust static library** (`genesis-core`) linked into the Go binary via CGO.
+
+```
+genesis CLI / K8s Controller (Go)
+        |
+        v
+   CGO Bridge (internal/bridge/)
+        |
+        v
+   genesis-core (Rust static library)
+   ├── Typestate machine (6 states, compile-time enforced)
+   ├── KeyMaterial (Zeroizing + mlock, no Clone/Debug/Serialize)
+   ├── KMS providers (AWS, GCP, Azure, OCI Vault)
+   └── age X25519 envelope crypto
+```
+
+**Build prerequisites:** Rust toolchain (see `rust-toolchain.toml`), `cbindgen`, and `CGO_ENABLED=1`.
 
 ## Security Model
 
