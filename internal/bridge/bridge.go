@@ -8,6 +8,7 @@
 package bridge
 
 /*
+#cgo CFLAGS: -DGENESIS_PQ
 #cgo LDFLAGS: -L${SRCDIR}/../../genesis-core/target/release -lgenesis_core -lm -lpthread
 #cgo darwin LDFLAGS: -framework Security -framework CoreFoundation
 #cgo linux LDFLAGS: -ldl
@@ -291,6 +292,315 @@ func (h *Handle) Free() {
 	if h != nil {
 		C.genesis_free(h.inner)
 		h.inner.ptr = nil
+	}
+}
+
+// ── PQ Hybrid Keyset Operations ─────────────────────────────────────
+
+// HybridPublicKeys contains the PQ keyset public components.
+type HybridPublicKeys struct {
+	AgeRecipient    string `json:"age_recipient"`
+	MLKEMPublicKey  string `json:"mlkem_public_key"`
+	SigningPublicKey string `json:"signing_public_key"`
+}
+
+// KeySetHandle wraps an opaque pointer to a Rust GenesisKeySet.
+// It must be freed with FreeKeySet() when no longer needed.
+// This is NOT a GenesisHandle — it has a separate allocation and free function.
+type KeySetHandle struct {
+	ptr unsafe.Pointer
+}
+
+// LocalKmsHandle wraps an opaque pointer to a Rust LocalKmsProvider.
+// It must be freed with FreeLocalKms() when no longer needed.
+type LocalKmsHandle struct {
+	ptr unsafe.Pointer
+}
+
+// GenerateKeySet generates a full PQ hybrid keyset (age + ML-KEM-1024 + ML-DSA-87).
+// Returns an opaque keyset handle and the public keys.
+// The handle must be freed with FreeKeySet().
+func GenerateKeySet() (*KeySetHandle, *HybridPublicKeys, error) {
+	result := C.genesis_generate_keyset()
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, nil, fmt.Errorf("genesis: %s", msg)
+	}
+
+	var dataJSON string
+	if result.data_json != nil {
+		dataJSON = C.GoString(result.data_json)
+		C.genesis_free_string(result.data_json)
+	}
+
+	ks := &KeySetHandle{ptr: result.handle.ptr}
+
+	var keys HybridPublicKeys
+	if err := json.Unmarshal([]byte(dataJSON), &keys); err != nil {
+		C.genesis_free_keyset(result.handle.ptr)
+		return nil, nil, fmt.Errorf("genesis: parse keyset public keys: %w", err)
+	}
+
+	return ks, &keys, nil
+}
+
+// FreeKeySet releases a keyset handle allocated by GenerateKeySet.
+// After this call the handle must not be used. Safe to call on nil.
+func FreeKeySet(ks *KeySetHandle) {
+	if ks != nil && ks.ptr != nil {
+		C.genesis_free_keyset(ks.ptr)
+		ks.ptr = nil
+	}
+}
+
+// GetPublicKeys extracts public keys from an existing keyset handle.
+// The handle is NOT consumed.
+func GetPublicKeys(ks *KeySetHandle) (*HybridPublicKeys, error) {
+	if ks == nil || ks.ptr == nil {
+		return nil, fmt.Errorf("genesis: nil keyset handle")
+	}
+
+	result := C.genesis_get_public_keys(ks.ptr)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, fmt.Errorf("genesis: %s", msg)
+	}
+
+	var dataJSON string
+	if result.data_json != nil {
+		dataJSON = C.GoString(result.data_json)
+		C.genesis_free_string(result.data_json)
+	}
+
+	var keys HybridPublicKeys
+	if err := json.Unmarshal([]byte(dataJSON), &keys); err != nil {
+		return nil, fmt.Errorf("genesis: parse public keys: %w", err)
+	}
+
+	return &keys, nil
+}
+
+// ExportAgeIdentity extracts the age identity (private key) string from
+// a keyset handle. This is needed to write the identity file for SOPS.
+// The handle is NOT consumed.
+func ExportAgeIdentity(ks *KeySetHandle) (string, error) {
+	if ks == nil || ks.ptr == nil {
+		return "", fmt.Errorf("genesis: nil keyset handle")
+	}
+
+	result := C.genesis_export_age_identity(ks.ptr)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return "", fmt.Errorf("genesis: %s", msg)
+	}
+
+	var identity string
+	if result.data_json != nil {
+		identity = C.GoString(result.data_json)
+		C.genesis_free_string(result.data_json)
+	}
+
+	return identity, nil
+}
+
+// SealHybrid encrypts plaintext using the hybrid envelope format (V2).
+// Returns the sealed envelope bytes.
+func SealHybrid(ks *KeySetHandle, plaintext []byte) ([]byte, error) {
+	if ks == nil || ks.ptr == nil {
+		return nil, fmt.Errorf("genesis: nil keyset handle")
+	}
+
+	var ptPtr *C.uint8_t
+	if len(plaintext) > 0 {
+		ptPtr = (*C.uint8_t)(unsafe.Pointer(&plaintext[0]))
+	}
+
+	var outPtr *C.uint8_t
+	var outLen C.uintptr_t
+
+	result := C.genesis_seal_hybrid(
+		ks.ptr,
+		ptPtr,
+		C.uintptr_t(len(plaintext)),
+		&outPtr,
+		&outLen,
+	)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, fmt.Errorf("genesis: %s", msg)
+	}
+	if result.data_json != nil {
+		C.genesis_free_string(result.data_json)
+	}
+
+	if outPtr == nil || outLen == 0 {
+		return nil, fmt.Errorf("genesis: seal returned empty output")
+	}
+
+	sealed := C.GoBytes(unsafe.Pointer(outPtr), C.int(outLen))
+	C.genesis_free_string((*C.char)(unsafe.Pointer(outPtr)))
+	return sealed, nil
+}
+
+// OpenHybrid decrypts a hybrid envelope (V2), returning the plaintext.
+func OpenHybrid(ks *KeySetHandle, envelope []byte) ([]byte, error) {
+	if ks == nil || ks.ptr == nil {
+		return nil, fmt.Errorf("genesis: nil keyset handle")
+	}
+	if len(envelope) == 0 {
+		return nil, fmt.Errorf("genesis: empty envelope")
+	}
+
+	envPtr := (*C.uint8_t)(unsafe.Pointer(&envelope[0]))
+	var outPtr *C.uint8_t
+	var outLen C.uintptr_t
+
+	result := C.genesis_open_hybrid(
+		ks.ptr,
+		envPtr,
+		C.uintptr_t(len(envelope)),
+		&outPtr,
+		&outLen,
+	)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, fmt.Errorf("genesis: %s", msg)
+	}
+	if result.data_json != nil {
+		C.genesis_free_string(result.data_json)
+	}
+
+	if outPtr == nil {
+		return []byte{}, nil
+	}
+
+	plaintext := C.GoBytes(unsafe.Pointer(outPtr), C.int(outLen))
+	C.genesis_free_string((*C.char)(unsafe.Pointer(outPtr)))
+	return plaintext, nil
+}
+
+// GenerateLocal creates a new local KMS provider with a random master key.
+// The master key is sealed in a hybrid envelope and written to envelopePath.
+// The keyset handle is NOT consumed.
+func GenerateLocal(ks *KeySetHandle, envelopePath string) (*LocalKmsHandle, error) {
+	if ks == nil || ks.ptr == nil {
+		return nil, fmt.Errorf("genesis: nil keyset handle")
+	}
+
+	cPath := C.CString(envelopePath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	result := C.genesis_generate_local(ks.ptr, cPath, nil)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, fmt.Errorf("genesis: %s", msg)
+	}
+	if result.data_json != nil {
+		C.genesis_free_string(result.data_json)
+	}
+
+	return &LocalKmsHandle{ptr: result.handle.ptr}, nil
+}
+
+// LoadLocal loads a LocalKmsProvider from an existing master key envelope.
+// The keyset's private keys are used to decrypt the envelope.
+// The keyset handle is NOT consumed.
+func LoadLocal(ks *KeySetHandle, envelopePath string) (*LocalKmsHandle, error) {
+	if ks == nil || ks.ptr == nil {
+		return nil, fmt.Errorf("genesis: nil keyset handle")
+	}
+
+	cPath := C.CString(envelopePath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	result := C.genesis_init_local(ks.ptr, cPath)
+
+	if !result.success {
+		var msg string
+		if result.error_message != nil {
+			msg = C.GoString(result.error_message)
+			C.genesis_free_string(result.error_message)
+		} else {
+			msg = fmt.Sprintf("genesis error code %d", result.error_code)
+		}
+		if result.data_json != nil {
+			C.genesis_free_string(result.data_json)
+		}
+		return nil, fmt.Errorf("genesis: %s", msg)
+	}
+	if result.data_json != nil {
+		C.genesis_free_string(result.data_json)
+	}
+
+	return &LocalKmsHandle{ptr: result.handle.ptr}, nil
+}
+
+// FreeLocalKms releases a LocalKmsProvider handle.
+// After this call the handle must not be used. Safe to call on nil.
+func FreeLocalKms(lk *LocalKmsHandle) {
+	if lk != nil && lk.ptr != nil {
+		C.genesis_free_local_kms(lk.ptr)
+		lk.ptr = nil
 	}
 }
 

@@ -29,11 +29,17 @@ jobs:
       - name: Check formatting
         run: cd genesis-core && cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (PQ default)
         run: cd genesis-core && cargo clippy --all-targets -- -D warnings
 
-      - name: Test
+      - name: Clippy (classical fallback)
+        run: cd genesis-core && cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Test (PQ default)
         run: cd genesis-core && cargo test
+
+      - name: Test (classical fallback)
+        run: cd genesis-core && cargo test --no-default-features
 
       - name: Install cargo-audit
         run: cargo install cargo-audit
@@ -61,6 +67,9 @@ jobs:
         run: |
           cargo install cbindgen
           cd genesis-core && cbindgen --config cbindgen.toml --output genesis_core.h
+
+      - name: Verify header matches committed copy
+        run: diff genesis-core/genesis_core.h internal/bridge/genesis_core.h
 
       - name: Stage Rust artifacts
         run: |

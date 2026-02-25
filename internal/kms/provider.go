@@ -20,6 +20,7 @@ const (
 	ProviderOCIVault      ProviderName = "oci-vault"
 	ProviderYubiKey       ProviderName = "yubikey"
 	ProviderTPM           ProviderName = "tpm"
+	ProviderLocal         ProviderName = "local"
 )
 
 // Provider defines the interface that all KMS providers must implement.

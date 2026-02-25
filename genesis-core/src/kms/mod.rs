@@ -9,6 +9,8 @@ pub mod aws;
 pub mod azure;
 pub mod config;
 pub mod gcp;
+#[cfg(feature = "pq")]
+pub mod local;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/larsenclose/genesis/internal/config"
 	"github.com/larsenclose/genesis/internal/envelope"
@@ -34,9 +35,10 @@ import (
 )
 
 var (
-	unsealConfig string
-	unsealInput  string
-	unsealOutput string
+	unsealConfig   string
+	unsealInput    string
+	unsealOutput   string
+	unsealIdentity string
 )
 
 var unsealCmd = &cobra.Command{
@@ -60,6 +62,7 @@ func init() {
 	unsealCmd.Flags().StringVar(&unsealConfig, "config", "", "Path to genesis configuration directory")
 	unsealCmd.Flags().StringVarP(&unsealInput, "input", "i", "", "Input file to decrypt")
 	unsealCmd.Flags().StringVarP(&unsealOutput, "output", "o", "", "Output file for decrypted content (default: stdout)")
+	unsealCmd.Flags().StringVar(&unsealIdentity, "identity", "", "Path to age identity file (for local provider; overrides SOPS_AGE_KEY_FILE)")
 
 	_ = unsealCmd.MarkFlagRequired("config") // Error ignored as cobra panics on invalid flag name
 	_ = unsealCmd.MarkFlagRequired("input")
@@ -88,30 +91,45 @@ func runUnseal(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	verboseLog("Creating KMS provider: %s", cfg.Spec.Envelope.Provider)
-	provider, err := createUnsealProvider(ctx, cfg)
-	if err != nil {
-		printError(err)
-		return err
-	}
+	var privateKey string
 
-	verboseLog("Decrypting envelope to retrieve age private key...")
-	ciphertext, err := base64.StdEncoding.DecodeString(cfg.Spec.Envelope.Ciphertext)
-	if err != nil {
-		printError(fmt.Errorf("failed to decode ciphertext: %w", err))
-		return err
-	}
+	if cfg.Spec.Envelope.Provider == kms.ProviderLocal {
+		// Local provider: read the age identity from identity file or env var.
+		// No cloud KMS decryption needed — the operator has the identity.
+		verboseLog("Local provider: reading age identity from identity file...")
+		pk, err := readLocalIdentity()
+		if err != nil {
+			printError(err)
+			return err
+		}
+		privateKey = pk
+	} else {
+		verboseLog("Creating KMS provider: %s", cfg.Spec.Envelope.Provider)
+		provider, err := createUnsealProvider(ctx, cfg)
+		if err != nil {
+			printError(err)
+			return err
+		}
 
-	env := &envelope.Envelope{
-		Provider:   cfg.Spec.Envelope.Provider,
-		PublicKey:  cfg.Spec.Envelope.PublicKey,
-		Ciphertext: ciphertext,
-	}
+		verboseLog("Decrypting envelope to retrieve age private key...")
+		ciphertext, err := base64.StdEncoding.DecodeString(cfg.Spec.Envelope.Ciphertext)
+		if err != nil {
+			printError(fmt.Errorf("failed to decode ciphertext: %w", err))
+			return err
+		}
 
-	privateKey, err := envelope.Open(ctx, provider, env)
-	if err != nil {
-		printError(fmt.Errorf("failed to decrypt envelope: %w", err))
-		return err
+		env := &envelope.Envelope{
+			Provider:   cfg.Spec.Envelope.Provider,
+			PublicKey:  cfg.Spec.Envelope.PublicKey,
+			Ciphertext: ciphertext,
+		}
+
+		pk, err := envelope.Open(ctx, provider, env)
+		if err != nil {
+			printError(fmt.Errorf("failed to decrypt envelope: %w", err))
+			return err
+		}
+		privateKey = pk
 	}
 
 	verboseLog("Running SOPS decryption...")
@@ -132,6 +150,33 @@ func runUnseal(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// readLocalIdentity reads the age identity from the --identity flag,
+// SOPS_AGE_KEY_FILE env var, or SOPS_AGE_KEY env var.
+func readLocalIdentity() (string, error) {
+	// Priority: --identity flag > SOPS_AGE_KEY env var > SOPS_AGE_KEY_FILE
+	if unsealIdentity != "" {
+		data, err := os.ReadFile(unsealIdentity) // #nosec G304 -- path is from user flag
+		if err != nil {
+			return "", fmt.Errorf("failed to read identity file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	if key := os.Getenv("SOPS_AGE_KEY"); key != "" {
+		return strings.TrimSpace(key), nil
+	}
+
+	if keyFile := os.Getenv("SOPS_AGE_KEY_FILE"); keyFile != "" {
+		data, err := os.ReadFile(keyFile) // #nosec G304 G703 -- path is from env var set by user
+		if err != nil {
+			return "", fmt.Errorf("failed to read SOPS_AGE_KEY_FILE: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	return "", fmt.Errorf("local provider requires --identity flag, SOPS_AGE_KEY, or SOPS_AGE_KEY_FILE")
 }
 
 func createUnsealProvider(ctx context.Context, cfg *config.BootstrapConfig) (kms.Provider, error) {

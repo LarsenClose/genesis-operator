@@ -16,5 +16,9 @@ include = [
 # No prefix -- CGO doesn't understand visibility macros
 # prefix = "GENESIS_API"
 
+[defines]
+"feature = pq" = "GENESIS_PQ"
+"feature = mock" = "GENESIS_MOCK"
+
 [enum]
 rename_variants = "ScreamingSnakeCase"
