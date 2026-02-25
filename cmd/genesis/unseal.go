@@ -169,7 +169,7 @@ func readLocalIdentity() (string, error) {
 	}
 
 	if keyFile := os.Getenv("SOPS_AGE_KEY_FILE"); keyFile != "" {
-		data, err := os.ReadFile(keyFile) // #nosec G304 -- path is from env var set by user
+		data, err := os.ReadFile(keyFile) // #nosec G304 G703 -- path is from env var set by user
 		if err != nil {
 			return "", fmt.Errorf("failed to read SOPS_AGE_KEY_FILE: %w", err)
 		}
