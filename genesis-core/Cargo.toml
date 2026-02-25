@@ -15,10 +15,12 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 hkdf = "0.12"
 sha2 = "0.10"
 
-# PQ (Phase 2, feature-gated)
-pqcrypto-mlkem = { version = "0.1", optional = true }
-pqcrypto-mldsa = { version = "0.1", optional = true }
-pqcrypto-traits = { version = "0.3", optional = true }
+# PQ (RustCrypto FIPS 203/204, feature-gated)
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom", "zeroize"], optional = true }
+ml-dsa = { version = "0.1.0-rc", features = ["rand_core"], optional = true }
+sha3 = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+getrandom = { version = "0.4", features = ["sys_rng"], optional = true }
 
 # KMS clients + HTTP
 ureq = { version = "2", features = ["json", "tls"] }
@@ -44,9 +46,10 @@ trybuild = "1.0"
 tempfile = "3"
 
 [features]
-default = []
+default = ["pq"]
 mock = []
-pq = ["pqcrypto-mlkem", "pqcrypto-mldsa", "pqcrypto-traits"]
+pq = ["ml-kem", "ml-dsa", "sha3", "chacha20poly1305", "getrandom"]
+local-kms = []
 
 [profile.release]
 panic = "abort"

@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `GenesisKeySet` in the current scope
+ --> tests/compile_fail/cannot_clone_keyset.rs:8:24
+  |
+8 |     let _copy = keyset.clone();
+  |                        ^^^^^ method not found in `GenesisKeySet`

@@ -45,6 +45,35 @@ pub enum GenesisError {
     #[error("public key mismatch: expected {expected}, got {got}")]
     PublicKeyMismatch { expected: String, got: String },
 
+    // PQ Crypto (210s)
+    #[error("PQ key generation failed: {0}")]
+    PqKeyGenFailed(String),
+
+    #[error("PQ encapsulation failed: {0}")]
+    PqEncapsulateFailed(String),
+
+    #[error("PQ decapsulation failed: {0}")]
+    PqDecapsulateFailed(String),
+
+    #[error("PQ signing failed: {0}")]
+    PqSignFailed(String),
+
+    #[error("PQ verification failed: {0}")]
+    PqVerifyFailed(String),
+
+    #[error("hybrid key combine failed: {0}")]
+    HybridCombineFailed(String),
+
+    // Envelope (220s)
+    #[error("envelope version mismatch: {0}")]
+    EnvelopeVersionMismatch(String),
+
+    #[error("envelope signature invalid")]
+    EnvelopeSignatureInvalid,
+
+    #[error("envelope parse failed: {0}")]
+    EnvelopeParseFailed(String),
+
     // KMS (300s)
     #[error("KMS call failed: {0}")]
     KmsCallFailed(String),
@@ -90,6 +119,17 @@ impl GenesisError {
             GenesisError::AgeDecryptFailed(_) => 202,
             GenesisError::PublicKeyMismatch { .. } => 203,
 
+            GenesisError::PqKeyGenFailed(_) => 210,
+            GenesisError::PqEncapsulateFailed(_) => 211,
+            GenesisError::PqDecapsulateFailed(_) => 212,
+            GenesisError::PqSignFailed(_) => 213,
+            GenesisError::PqVerifyFailed(_) => 214,
+            GenesisError::HybridCombineFailed(_) => 215,
+
+            GenesisError::EnvelopeVersionMismatch(_) => 220,
+            GenesisError::EnvelopeSignatureInvalid => 221,
+            GenesisError::EnvelopeParseFailed(_) => 222,
+
             GenesisError::KmsCallFailed(_) => 300,
             GenesisError::KmsResponseInvalid => 301,
             GenesisError::KmsNotConfigured => 302,
@@ -112,6 +152,64 @@ pub struct PublicArtifacts {
     pub public_key: String,
     pub envelope_ciphertext: Vec<u8>,
     pub sops_config: String,
+}
+
+/// Full PQ keypair set generated during hybrid init.
+///
+/// All private keys are wrapped in [`KeyMaterial`] and never leave
+/// Rust's memory model. Public keys can be stored in the
+/// GenesisBootstrap CRD status.
+///
+/// **Intentionally not Clone** -- private keys must not be duplicated.
+#[cfg(feature = "pq")]
+pub struct GenesisKeySet {
+    /// X25519 private key (age format, UTF-8 `AGE-SECRET-KEY-1...`).
+    pub age_identity: KeyMaterial,
+    /// X25519 public key (age format, `age1...`).
+    pub age_recipient: String,
+    /// ML-KEM-1024 decapsulation key seed (64 bytes).
+    pub mlkem_private_key: KeyMaterial,
+    /// ML-KEM-1024 encapsulation key (1568 bytes).
+    pub mlkem_public_key: Vec<u8>,
+    /// ML-DSA-87 signing key seed (32 bytes).
+    pub signing_key: KeyMaterial,
+    /// ML-DSA-87 verifying key (2592 bytes).
+    pub signing_public_key: Vec<u8>,
+}
+
+#[cfg(feature = "pq")]
+impl GenesisKeySet {
+    /// Generate a complete PQ keypair set.
+    pub fn generate() -> Result<Self, GenesisError> {
+        let (age_recipient, age_identity) = crypto::age::generate_keypair()?;
+        let (mlkem_public_key, mlkem_private_key) = crypto::pq::mlkem_generate_keypair()?;
+        let (signing_public_key, signing_key) = crypto::pq::mldsa_generate_keypair()?;
+
+        Ok(GenesisKeySet {
+            age_identity,
+            age_recipient,
+            mlkem_private_key,
+            mlkem_public_key,
+            signing_key,
+            signing_public_key,
+        })
+    }
+
+    /// Extract the public-only components as JSON for CRD storage.
+    pub fn public_keys_json(&self) -> Result<String, GenesisError> {
+        let value = serde_json::json!({
+            "age_recipient": self.age_recipient,
+            "mlkem_public_key": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &self.mlkem_public_key
+            ),
+            "signing_public_key": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &self.signing_public_key
+            ),
+        });
+        serde_json::to_string(&value).map_err(GenesisError::from)
+    }
 }
 
 /// Result of verifying the current key material against a stored envelope.

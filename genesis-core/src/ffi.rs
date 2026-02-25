@@ -915,6 +915,531 @@ pub unsafe extern "C" fn genesis_free_string(s: *mut c_char) {
     }
 }
 
+// ── PQ / Hybrid FFI (feature-gated) ─────────────────────────────────
+
+/// Generate a full PQ keypair set (age + ML-KEM-1024 + ML-DSA-87).
+///
+/// Returns a [`GenesisResult`] with `data_json` containing the public keys
+/// as JSON. The private keys are stored in the returned handle.
+///
+/// # Safety
+///
+/// No preconditions. The returned handle must eventually be freed.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_generate_keyset() -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<(String, *mut c_void), crate::GenesisError> {
+        let keyset = crate::GenesisKeySet::generate()?;
+        let json = keyset.public_keys_json()?;
+        let keyset_ptr = Box::into_raw(Box::new(keyset)) as *mut c_void;
+        Ok((json, keyset_ptr))
+    });
+
+    match result {
+        Ok(Ok((json, keyset_ptr))) => {
+            let data_json = CString::new(json).unwrap_or_default();
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Uninitialized,
+                },
+                data_json: data_json.into_raw(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_generate_keyset")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Free a GenesisKeySet allocated by `genesis_generate_keyset`.
+///
+/// # Safety
+///
+/// `ptr` must be a pointer returned by `genesis_generate_keyset`, or NULL.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_free_keyset(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        let _ = panic::catch_unwind(|| {
+            let _ = Box::from_raw(ptr as *mut crate::GenesisKeySet);
+        });
+    }
+}
+
+/// Seal plaintext into a hybrid envelope (V2).
+///
+/// Returns the serialized envelope bytes via `out` / `out_len`.
+/// The caller is responsible for freeing `*out` with `genesis_free_string`
+/// (reinterpret as `*mut c_char`).
+///
+/// # Safety
+///
+/// - `plaintext` must be a valid pointer with at least `plaintext_len` bytes.
+/// - `age_recipient` must be a NUL-terminated C string.
+/// - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`.
+/// - `out` and `out_len` must be valid pointers.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_seal_hybrid(
+    keyset_ptr: *mut c_void,
+    plaintext: *const u8,
+    plaintext_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<Vec<u8>, crate::GenesisError> {
+        if keyset_ptr.is_null() || plaintext.is_null() || out.is_null() || out_len.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        let pt = std::slice::from_raw_parts(plaintext, plaintext_len);
+
+        let envelope = crate::envelope::hybrid::HybridEnvelope::seal(
+            pt,
+            &keyset.age_recipient,
+            &keyset.mlkem_public_key,
+            &keyset.signing_key,
+        )?;
+
+        Ok(envelope.to_bytes())
+    });
+
+    match result {
+        Ok(Ok(bytes)) => {
+            let len = bytes.len();
+            let ptr_out = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+            *out = ptr_out;
+            *out_len = len;
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Initialized,
+                },
+                data_json: ptr::null_mut(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_seal_hybrid")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Open a hybrid envelope (V2), recovering the plaintext.
+///
+/// # Safety
+///
+/// - `keyset_ptr` must be a valid keyset pointer.
+/// - `envelope` must point to at least `envelope_len` bytes of a serialized V2 envelope.
+/// - `out` and `out_len` must be valid pointers.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_open_hybrid(
+    keyset_ptr: *mut c_void,
+    envelope: *const u8,
+    envelope_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<Vec<u8>, crate::GenesisError> {
+        if keyset_ptr.is_null() || envelope.is_null() || out.is_null() || out_len.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        let env_bytes = std::slice::from_raw_parts(envelope, envelope_len);
+
+        let hybrid_envelope = crate::envelope::hybrid::HybridEnvelope::from_bytes(env_bytes)?;
+        hybrid_envelope.open(&keyset.age_identity, &keyset.mlkem_private_key)
+    });
+
+    match result {
+        Ok(Ok(plaintext)) => {
+            let len = plaintext.len();
+            let ptr_out = Box::into_raw(plaintext.into_boxed_slice()) as *mut u8;
+            *out = ptr_out;
+            *out_len = len;
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Initialized,
+                },
+                data_json: ptr::null_mut(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_open_hybrid")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Initialize a hybrid keyset from a provider type and config JSON.
+///
+/// This is the spec-mandated entry point for hybrid PQ init. It generates
+/// a full [`GenesisKeySet`] (age + ML-KEM-1024 + ML-DSA-87) and returns
+/// the keyset as an opaque handle with the public keys JSON in `data_json`.
+///
+/// Functionally equivalent to [`genesis_generate_keyset`] but accepts
+/// provider/config arguments for forward compatibility.
+///
+/// # Safety
+///
+/// - `provider` must be a NUL-terminated C string (or NULL, ignored).
+/// - `config_json` must be a NUL-terminated C string (or NULL, ignored).
+/// - The returned handle must eventually be freed with `genesis_free_keyset`.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_init_hybrid(
+    _provider: *const c_char,
+    _config_json: *const c_char,
+) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<(String, *mut c_void), crate::GenesisError> {
+        let keyset = crate::GenesisKeySet::generate()?;
+        let json = keyset.public_keys_json()?;
+        let keyset_ptr = Box::into_raw(Box::new(keyset)) as *mut c_void;
+        Ok((json, keyset_ptr))
+    });
+
+    match result {
+        Ok(Ok((json, keyset_ptr))) => {
+            let data_json = CString::new(json).unwrap_or_default();
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Uninitialized,
+                },
+                data_json: data_json.into_raw(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_init_hybrid")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Extract the public keys JSON from a keyset handle.
+///
+/// The handle is NOT consumed -- callers may continue to use it for
+/// sealing/opening operations after retrieving the public keys.
+///
+/// Returns a [`GenesisResult`] with `data_json` containing the public
+/// keys as JSON (`age_recipient`, `mlkem_public_key`, `signing_public_key`).
+///
+/// # Safety
+///
+/// - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`
+///   or `genesis_init_hybrid`, or NULL (returns error).
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_get_public_keys(keyset_ptr: *mut c_void) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<String, crate::GenesisError> {
+        if keyset_ptr.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        keyset.public_keys_json()
+    });
+
+    match result {
+        Ok(Ok(json)) => {
+            let data_json = CString::new(json).unwrap_or_default();
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Uninitialized,
+                },
+                data_json: data_json.into_raw(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_get_public_keys")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Load a [`LocalKmsProvider`] from an existing master key envelope on disk.
+///
+/// The identity keys needed to decrypt the envelope are taken from the
+/// provided keyset handle (`keyset_ptr`). The keyset is NOT consumed.
+///
+/// Returns a [`GenesisResult`] with the [`LocalKmsProvider`] as an opaque
+/// handle. Free with `genesis_free_local_kms`.
+///
+/// # Safety
+///
+/// - `keyset_ptr` must be a valid keyset pointer from `genesis_generate_keyset`
+///   or `genesis_init_hybrid`.
+/// - `envelope_path` must be a NUL-terminated C string pointing to a readable
+///   hybrid-envelope file on disk.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_init_local(
+    keyset_ptr: *mut c_void,
+    envelope_path: *const c_char,
+) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<*mut c_void, crate::GenesisError> {
+        if keyset_ptr.is_null() || envelope_path.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        let path_str = CStr::from_ptr(envelope_path)
+            .to_str()
+            .map_err(|e| crate::GenesisError::KmsCallFailed(format!("invalid UTF-8: {e}")))?;
+        let path = std::path::Path::new(path_str);
+
+        let provider = crate::kms::local::LocalKmsProvider::from_envelope(
+            path,
+            &keyset.age_identity,
+            &keyset.mlkem_private_key,
+        )?;
+
+        Ok(Box::into_raw(Box::new(provider)) as *mut c_void)
+    });
+
+    match result {
+        Ok(Ok(provider_ptr)) => GenesisResult {
+            success: true,
+            error_code: 0,
+            error_message: ptr::null_mut(),
+            handle: GenesisHandle {
+                ptr: provider_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_init_local")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Generate a new [`LocalKmsProvider`] with a random master key.
+///
+/// The master key is sealed into a hybrid envelope using the keyset's
+/// public keys and signing key, then written to `envelope_path` on disk.
+/// Returns the initialized provider as an opaque handle.
+///
+/// # Safety
+///
+/// - `keyset_ptr` must be a valid keyset pointer from `genesis_generate_keyset`
+///   or `genesis_init_hybrid`.
+/// - `envelope_path` must be a NUL-terminated C string pointing to a writable
+///   location on disk.
+/// - `config_json` must be a NUL-terminated C string (or NULL, ignored --
+///   reserved for future configuration).
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_generate_local(
+    keyset_ptr: *mut c_void,
+    envelope_path: *const c_char,
+    _config_json: *const c_char,
+) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<*mut c_void, crate::GenesisError> {
+        if keyset_ptr.is_null() || envelope_path.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        let path_str = CStr::from_ptr(envelope_path)
+            .to_str()
+            .map_err(|e| crate::GenesisError::KmsCallFailed(format!("invalid UTF-8: {e}")))?;
+        let path = std::path::Path::new(path_str);
+
+        let provider = crate::kms::local::LocalKmsProvider::generate(
+            path,
+            &keyset.age_recipient,
+            &keyset.mlkem_public_key,
+            &keyset.signing_key,
+        )?;
+
+        Ok(Box::into_raw(Box::new(provider)) as *mut c_void)
+    });
+
+    match result {
+        Ok(Ok(provider_ptr)) => GenesisResult {
+            success: true,
+            error_code: 0,
+            error_message: ptr::null_mut(),
+            handle: GenesisHandle {
+                ptr: provider_ptr,
+                state: StateTag::Initialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_generate_local")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: ptr::null_mut(),
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
+/// Free a [`LocalKmsProvider`] allocated by `genesis_init_local` or
+/// `genesis_generate_local`.
+///
+/// # Safety
+///
+/// `ptr` must be a pointer returned by `genesis_init_local` or
+/// `genesis_generate_local`, or NULL.
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_free_local_kms(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        let _ = panic::catch_unwind(|| {
+            let _ = Box::from_raw(ptr as *mut crate::kms::local::LocalKmsProvider);
+        });
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
