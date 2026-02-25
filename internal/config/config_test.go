@@ -579,3 +579,161 @@ func TestSOPSConfigPathRegex(t *testing.T) {
 	assert.Equal(t, "*.enc.yaml", sopsConfig.CreationRules[0].PathRegex)
 	assert.Equal(t, publicKey, sopsConfig.CreationRules[0].Age)
 }
+
+// ── Local Provider Validation Tests ─────────────────────────────────
+
+func TestBootstrapConfigValidateLocalProvider(t *testing.T) {
+	t.Run("valid local config", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider:     kms.ProviderLocal,
+					PublicKey:    "age1testkey",
+					EnvelopePath: "/tmp/test.enc",
+				},
+				Output: config.OutputSpec{
+					SecretName:      "sops-age",
+					SecretNamespace: "flux-system",
+					SecretKey:       "age.agekey",
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("local missing envelope path", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider:  kms.ProviderLocal,
+					PublicKey: "age1testkey",
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "envelopePath")
+	})
+
+	t.Run("local does not require ciphertext", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider:     kms.ProviderLocal,
+					PublicKey:    "age1testkey",
+					EnvelopePath: "/tmp/test.enc",
+					Ciphertext:   "", // intentionally empty
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.NoError(t, err)
+	})
+}
+
+// ── PQ Field Save/Load Roundtrip ────────────────────────────────────
+
+func TestBootstrapConfigSaveLoadLocalPQFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "bootstrap.yaml")
+
+	original := &config.BootstrapConfig{
+		APIVersion: config.APIVersion,
+		Kind:       config.KindBootstrap,
+		Metadata: config.Metadata{
+			Name:      "test",
+			Namespace: "test",
+		},
+		Spec: config.BootstrapSpec{
+			Envelope: config.EnvelopeSpec{
+				Provider:        kms.ProviderLocal,
+				PublicKey:       "age1testkey",
+				MLKEMPublicKey:  "mlkem-test-data",
+				SigningPublicKey: "mldsa-test-data",
+				EnvelopePath:    "/tmp/envelope.enc",
+			},
+			Output: config.OutputSpec{
+				SecretName:      "sops-age",
+				SecretNamespace: "flux-system",
+				SecretKey:       "age.agekey",
+			},
+		},
+	}
+
+	err := config.Save(configPath, original)
+	require.NoError(t, err)
+
+	loaded, err := config.Load(configPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, kms.ProviderLocal, loaded.Spec.Envelope.Provider)
+	assert.Equal(t, "mlkem-test-data", loaded.Spec.Envelope.MLKEMPublicKey)
+	assert.Equal(t, "mldsa-test-data", loaded.Spec.Envelope.SigningPublicKey)
+	assert.Equal(t, "/tmp/envelope.enc", loaded.Spec.Envelope.EnvelopePath)
+	assert.Equal(t, "age1testkey", loaded.Spec.Envelope.PublicKey)
+}
+
+// ── OCI Vault Validation Tests (fills pre-existing gap) ─────────────
+
+func TestBootstrapConfigValidateOCIVault(t *testing.T) {
+	t.Run("valid oci-vault config", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider: kms.ProviderOCIVault,
+					OCIVault: &config.OCIVaultSpec{
+						KeyOCID:        "ocid1.key.oc1..test",
+						CryptoEndpoint: "https://vault-crypto.kms.us-east-1.oraclecloud.com",
+					},
+					Ciphertext: "dGVzdA==",
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("oci-vault missing key ocid", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider:   kms.ProviderOCIVault,
+					Ciphertext: "dGVzdA==",
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ociVault.keyOcid")
+	})
+
+	t.Run("oci-vault missing crypto endpoint", func(t *testing.T) {
+		cfg := config.BootstrapConfig{
+			APIVersion: config.APIVersion,
+			Kind:       config.KindBootstrap,
+			Spec: config.BootstrapSpec{
+				Envelope: config.EnvelopeSpec{
+					Provider: kms.ProviderOCIVault,
+					OCIVault: &config.OCIVaultSpec{
+						KeyOCID: "ocid1.key.oc1..test",
+					},
+					Ciphertext: "dGVzdA==",
+				},
+			},
+		}
+		err := cfg.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cryptoEndpoint")
+	})
+}

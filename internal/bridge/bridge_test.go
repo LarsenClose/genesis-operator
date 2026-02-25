@@ -417,3 +417,288 @@ func TestExportAgeIdentityNilHandle(t *testing.T) {
 		t.Error("expected error for nil handle")
 	}
 }
+
+// ── PQ Error Path Tests ─────────────────────────────────────────────
+
+func TestSealHybridNilKeyset(t *testing.T) {
+	_, err := SealHybrid(nil, []byte("test"))
+	if err == nil {
+		t.Fatal("expected error for nil keyset")
+	}
+}
+
+func TestSealHybridNilPtr(t *testing.T) {
+	_, err := SealHybrid(&KeySetHandle{ptr: nil}, []byte("test"))
+	if err == nil {
+		t.Fatal("expected error for nil ptr keyset")
+	}
+}
+
+func TestOpenHybridNilKeyset(t *testing.T) {
+	_, err := OpenHybrid(nil, []byte("test"))
+	if err == nil {
+		t.Fatal("expected error for nil keyset")
+	}
+}
+
+func TestOpenHybridNilPtr(t *testing.T) {
+	_, err := OpenHybrid(&KeySetHandle{ptr: nil}, []byte("test"))
+	if err == nil {
+		t.Fatal("expected error for nil ptr keyset")
+	}
+}
+
+func TestOpenHybridEmptyEnvelope(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	_, err = OpenHybrid(ks, []byte{})
+	if err == nil {
+		t.Fatal("expected error for empty envelope")
+	}
+}
+
+func TestOpenHybridGarbageInput(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	_, err = OpenHybrid(ks, []byte("not-a-valid-envelope-data-here"))
+	if err == nil {
+		t.Fatal("expected error for garbage input")
+	}
+}
+
+func TestGenerateLocalNilKeyset(t *testing.T) {
+	_, err := GenerateLocal(nil, "/tmp/test.enc")
+	if err == nil {
+		t.Fatal("expected error for nil keyset")
+	}
+}
+
+func TestGenerateLocalNilPtr(t *testing.T) {
+	_, err := GenerateLocal(&KeySetHandle{ptr: nil}, "/tmp/test.enc")
+	if err == nil {
+		t.Fatal("expected error for nil ptr keyset")
+	}
+}
+
+func TestLoadLocalNilKeyset(t *testing.T) {
+	_, err := LoadLocal(nil, "/tmp/test.enc")
+	if err == nil {
+		t.Fatal("expected error for nil keyset")
+	}
+}
+
+func TestLoadLocalNilPtr(t *testing.T) {
+	_, err := LoadLocal(&KeySetHandle{ptr: nil}, "/tmp/test.enc")
+	if err == nil {
+		t.Fatal("expected error for nil ptr keyset")
+	}
+}
+
+func TestLoadLocalBadPath(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	_, err = LoadLocal(ks, "/nonexistent/path/envelope.enc")
+	if err == nil {
+		t.Fatal("expected error for nonexistent path")
+	}
+}
+
+func TestGetPublicKeysNilPtr(t *testing.T) {
+	_, err := GetPublicKeys(&KeySetHandle{ptr: nil})
+	if err == nil {
+		t.Error("expected error for nil ptr handle")
+	}
+}
+
+func TestExportAgeIdentityNilPtr(t *testing.T) {
+	_, err := ExportAgeIdentity(&KeySetHandle{ptr: nil})
+	if err == nil {
+		t.Error("expected error for nil ptr handle")
+	}
+}
+
+// ── Wrong-state tests: trigger Rust error paths via state machine ────
+
+func TestStatusWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// Status from Uninitialized state should fail
+	_, err = h.Status()
+	if err == nil {
+		t.Error("expected error calling Status from Uninitialized state")
+	}
+}
+
+func TestInitDoubleInit(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	kmsJSON := `{"provider_type":"mock"}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	_, err = h.Init(kmsJSON)
+	if err != nil {
+		t.Fatalf("first Init() failed: %v", err)
+	}
+
+	// Second Init from Initialized state should fail
+	_, err = h.Init(kmsJSON)
+	if err == nil {
+		t.Error("expected error for double init")
+	}
+}
+
+func TestVerifyWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	kmsJSON := `{"provider_type":"mock"}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// Verify from Uninitialized state should fail
+	_, err = h.Verify(kmsJSON)
+	if err == nil {
+		t.Error("expected error calling Verify from Uninitialized state")
+	}
+}
+
+func TestBeginRotationWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// BeginRotation from Uninitialized state should fail
+	err = h.BeginRotation()
+	if err == nil {
+		t.Error("expected error calling BeginRotation from Uninitialized state")
+	}
+}
+
+func TestCompleteRotationWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	kmsJSON := `{"provider_type":"mock"}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// CompleteRotation from Uninitialized state should fail
+	_, err = h.CompleteRotation(kmsJSON, "secret", "ns", "key")
+	if err == nil {
+		t.Error("expected error calling CompleteRotation from Uninitialized state")
+	}
+}
+
+func TestInjectSecretWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// InjectSecret from Uninitialized state should fail
+	err = h.InjectSecret("test", "ns", "key")
+	if err == nil {
+		t.Error("expected error calling InjectSecret from Uninitialized state")
+	}
+}
+
+// ── FFI error path tests (bad input triggers Rust errors) ───────────
+
+// TestGenerateLocalBadDir triggers the Rust-side error path when the
+// target directory does not exist (file creation fails).
+func TestGenerateLocalBadDir(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	_, err = GenerateLocal(ks, "/nonexistent/dir/envelope.enc")
+	if err == nil {
+		t.Fatal("expected error for nonexistent directory")
+	}
+}
+
+// TestSealOpenHybridLargePayload verifies roundtrip with a non-trivial payload.
+func TestSealOpenHybridLargePayload(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	plaintext := make([]byte, 64*1024) // 64 KiB
+	for i := range plaintext {
+		plaintext[i] = byte(i % 256)
+	}
+
+	sealed, err := SealHybrid(ks, plaintext)
+	if err != nil {
+		t.Fatalf("SealHybrid(large) failed: %v", err)
+	}
+	if len(sealed) < len(plaintext) {
+		t.Errorf("sealed size %d < plaintext size %d", len(sealed), len(plaintext))
+	}
+
+	opened, err := OpenHybrid(ks, sealed)
+	if err != nil {
+		t.Fatalf("OpenHybrid(large) failed: %v", err)
+	}
+	if !bytes.Equal(opened, plaintext) {
+		t.Error("large payload roundtrip mismatch")
+	}
+}
+
+// TestGenerateLocalRoundtripWithReload creates a local KMS, frees it,
+// then loads from the same envelope with the same keyset.
+func TestGenerateLocalRoundtripWithReload(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "master.enc")
+
+	// Generate
+	lk, err := GenerateLocal(ks, envPath)
+	if err != nil {
+		t.Fatalf("GenerateLocal() failed: %v", err)
+	}
+	FreeLocalKms(lk)
+
+	// Reload with same keyset
+	lk2, err := LoadLocal(ks, envPath)
+	if err != nil {
+		t.Fatalf("LoadLocal() failed: %v", err)
+	}
+	FreeLocalKms(lk2)
+}
