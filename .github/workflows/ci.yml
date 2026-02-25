@@ -68,6 +68,9 @@ jobs:
           cargo install cbindgen
           cd genesis-core && cbindgen --config cbindgen.toml --output genesis_core.h
 
+      - name: Verify header matches committed copy
+        run: diff genesis-core/genesis_core.h internal/bridge/genesis_core.h
+
       - name: Stage Rust artifacts
         run: |
           mkdir -p rust-artifacts

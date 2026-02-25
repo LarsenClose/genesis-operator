@@ -1440,6 +1440,69 @@ pub unsafe extern "C" fn genesis_free_local_kms(ptr: *mut c_void) {
     }
 }
 
+/// Export the age identity (private key string) from a keyset handle.
+///
+/// The age identity is needed by the Go host to write an identity file
+/// for SOPS decryption.  Returns a [`GenesisResult`] with the age
+/// identity string in `data_json` (format: `AGE-SECRET-KEY-1...`).
+///
+/// # Safety
+///
+/// - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`
+///   or `genesis_init_hybrid`, or NULL (returns error).
+#[cfg(feature = "pq")]
+#[no_mangle]
+pub unsafe extern "C" fn genesis_export_age_identity(keyset_ptr: *mut c_void) -> GenesisResult {
+    let result = panic::catch_unwind(|| -> Result<String, crate::GenesisError> {
+        if keyset_ptr.is_null() {
+            return Err(crate::GenesisError::KmsCallFailed("null pointer".into()));
+        }
+
+        let keyset = &*(keyset_ptr as *const crate::GenesisKeySet);
+        let identity = std::str::from_utf8(keyset.age_identity.as_bytes())
+            .map_err(|e| crate::GenesisError::KmsCallFailed(format!("invalid UTF-8: {e}")))?;
+        Ok(identity.to_string())
+    });
+
+    match result {
+        Ok(Ok(identity)) => {
+            let data_json = CString::new(identity).unwrap_or_default();
+            GenesisResult {
+                success: true,
+                error_code: 0,
+                error_message: ptr::null_mut(),
+                handle: GenesisHandle {
+                    ptr: keyset_ptr,
+                    state: StateTag::Uninitialized,
+                },
+                data_json: data_json.into_raw(),
+            }
+        }
+        Ok(Err(e)) => GenesisResult {
+            success: false,
+            error_code: e.error_code(),
+            error_message: CString::new(e.to_string()).unwrap_or_default().into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+        Err(_) => GenesisResult {
+            success: false,
+            error_code: 999,
+            error_message: CString::new("Rust panic in genesis_export_age_identity")
+                .unwrap_or_default()
+                .into_raw(),
+            handle: GenesisHandle {
+                ptr: keyset_ptr,
+                state: StateTag::Uninitialized,
+            },
+            data_json: ptr::null_mut(),
+        },
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]

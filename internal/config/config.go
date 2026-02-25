@@ -40,7 +40,12 @@ type EnvelopeSpec struct {
 	OCIVault      *OCIVaultSpec    `yaml:"ociVault,omitempty"`
 	YubiKey       *YubiKeySpec     `yaml:"yubikey,omitempty"`
 	TPM           *TPMSpec         `yaml:"tpm,omitempty"`
-	Ciphertext    string           `yaml:"ciphertext"`
+	Ciphertext    string           `yaml:"ciphertext,omitempty"`
+
+	// PQ fields (V2 hybrid envelopes, local provider)
+	MLKEMPublicKey  string `yaml:"mlkemPublicKey,omitempty"`
+	SigningPublicKey string `yaml:"signingPublicKey,omitempty"`
+	EnvelopePath    string `yaml:"envelopePath,omitempty"`
 }
 
 type AWSKMSSpec struct {
@@ -95,11 +100,16 @@ func (c *BootstrapConfig) Validate() error {
 	if c.Spec.Envelope.Provider == "" {
 		return errors.New("envelope.provider is required")
 	}
-	if c.Spec.Envelope.Ciphertext == "" {
+	// Local provider uses envelope path instead of ciphertext
+	if c.Spec.Envelope.Provider != kms.ProviderLocal && c.Spec.Envelope.Ciphertext == "" {
 		return errors.New("envelope.ciphertext is required")
 	}
 
 	switch c.Spec.Envelope.Provider {
+	case kms.ProviderLocal:
+		if c.Spec.Envelope.EnvelopePath == "" {
+			return errors.New("envelope.envelopePath is required for local provider")
+		}
 	case kms.ProviderAWSKMS:
 		if c.Spec.Envelope.AWSKMS == nil || c.Spec.Envelope.AWSKMS.KeyArn == "" {
 			return errors.New("awsKms.keyArn is required for aws-kms provider")

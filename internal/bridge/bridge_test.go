@@ -1,7 +1,11 @@
 package bridge
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -220,5 +224,196 @@ func TestArtifactsJSONRoundtrip(t *testing.T) {
 	}
 	if a2.PublicKey != a.PublicKey {
 		t.Errorf("PublicKey mismatch: %q != %q", a2.PublicKey, a.PublicKey)
+	}
+}
+
+// ── PQ Hybrid Keyset Tests ──────────────────────────────────────────
+
+func TestGenerateKeySet(t *testing.T) {
+	ks, pubKeys, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	if ks.ptr == nil {
+		t.Fatal("expected non-nil keyset pointer")
+	}
+	if pubKeys.AgeRecipient == "" {
+		t.Error("expected non-empty age_recipient")
+	}
+	if !strings.HasPrefix(pubKeys.AgeRecipient, "age1") {
+		t.Errorf("expected age1 prefix, got %q", pubKeys.AgeRecipient)
+	}
+	if pubKeys.MLKEMPublicKey == "" {
+		t.Error("expected non-empty mlkem_public_key")
+	}
+	if pubKeys.SigningPublicKey == "" {
+		t.Error("expected non-empty signing_public_key")
+	}
+
+	t.Logf("age recipient: %s", pubKeys.AgeRecipient)
+	t.Logf("ML-KEM public key length: %d", len(pubKeys.MLKEMPublicKey))
+	t.Logf("ML-DSA signing key length: %d", len(pubKeys.SigningPublicKey))
+}
+
+func TestGetPublicKeys(t *testing.T) {
+	ks, pubKeys1, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	pubKeys2, err := GetPublicKeys(ks)
+	if err != nil {
+		t.Fatalf("GetPublicKeys() failed: %v", err)
+	}
+
+	if pubKeys1.AgeRecipient != pubKeys2.AgeRecipient {
+		t.Errorf("age recipient mismatch: %q vs %q", pubKeys1.AgeRecipient, pubKeys2.AgeRecipient)
+	}
+	if pubKeys1.MLKEMPublicKey != pubKeys2.MLKEMPublicKey {
+		t.Error("ML-KEM public key mismatch")
+	}
+	if pubKeys1.SigningPublicKey != pubKeys2.SigningPublicKey {
+		t.Error("signing public key mismatch")
+	}
+}
+
+func TestExportAgeIdentity(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	identity, err := ExportAgeIdentity(ks)
+	if err != nil {
+		t.Fatalf("ExportAgeIdentity() failed: %v", err)
+	}
+
+	if !strings.HasPrefix(identity, "AGE-SECRET-KEY-1") {
+		t.Errorf("expected AGE-SECRET-KEY-1 prefix, got %q", identity[:20])
+	}
+	t.Logf("age identity: %s...%s", identity[:20], identity[len(identity)-4:])
+}
+
+func TestSealOpenHybrid(t *testing.T) {
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	plaintext := []byte("hello, post-quantum world!")
+
+	sealed, err := SealHybrid(ks, plaintext)
+	if err != nil {
+		t.Fatalf("SealHybrid() failed: %v", err)
+	}
+	if len(sealed) == 0 {
+		t.Fatal("expected non-empty sealed output")
+	}
+	if bytes.Equal(sealed, plaintext) {
+		t.Error("sealed output should differ from plaintext")
+	}
+
+	// Verify V2 magic header (GEN2)
+	if !bytes.HasPrefix(sealed, []byte("GEN2")) {
+		t.Errorf("expected GEN2 magic, got %q", sealed[:4])
+	}
+
+	opened, err := OpenHybrid(ks, sealed)
+	if err != nil {
+		t.Fatalf("OpenHybrid() failed: %v", err)
+	}
+	if !bytes.Equal(opened, plaintext) {
+		t.Errorf("roundtrip mismatch: got %q, want %q", opened, plaintext)
+	}
+}
+
+func TestSealOpenWrongKey(t *testing.T) {
+	ks1, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() #1 failed: %v", err)
+	}
+	defer FreeKeySet(ks1)
+
+	ks2, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() #2 failed: %v", err)
+	}
+	defer FreeKeySet(ks2)
+
+	plaintext := []byte("secret data")
+	sealed, err := SealHybrid(ks1, plaintext)
+	if err != nil {
+		t.Fatalf("SealHybrid() failed: %v", err)
+	}
+
+	// Opening with wrong key should fail
+	_, err = OpenHybrid(ks2, sealed)
+	if err == nil {
+		t.Fatal("expected error when opening with wrong key")
+	}
+}
+
+func TestGenerateLocalAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	envelopePath := filepath.Join(dir, "master-key.enc")
+
+	ks, _, err := GenerateKeySet()
+	if err != nil {
+		t.Fatalf("GenerateKeySet() failed: %v", err)
+	}
+	defer FreeKeySet(ks)
+
+	// Generate local KMS (creates master key envelope on disk)
+	lk, err := GenerateLocal(ks, envelopePath)
+	if err != nil {
+		t.Fatalf("GenerateLocal() failed: %v", err)
+	}
+	FreeLocalKms(lk)
+
+	// Verify envelope file exists
+	info, err := os.Stat(envelopePath)
+	if err != nil {
+		t.Fatalf("envelope file not found: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("envelope file is empty")
+	}
+	t.Logf("envelope file size: %d bytes", info.Size())
+
+	// Reload from disk
+	lk2, err := LoadLocal(ks, envelopePath)
+	if err != nil {
+		t.Fatalf("LoadLocal() failed: %v", err)
+	}
+	FreeLocalKms(lk2)
+}
+
+func TestFreeKeySetNil(t *testing.T) {
+	// Should be safe no-ops
+	FreeKeySet(nil)
+	FreeKeySet(&KeySetHandle{ptr: nil})
+}
+
+func TestFreeLocalKmsNil(t *testing.T) {
+	FreeLocalKms(nil)
+	FreeLocalKms(&LocalKmsHandle{ptr: nil})
+}
+
+func TestGetPublicKeysNilHandle(t *testing.T) {
+	_, err := GetPublicKeys(nil)
+	if err == nil {
+		t.Error("expected error for nil handle")
+	}
+}
+
+func TestExportAgeIdentityNilHandle(t *testing.T) {
+	_, err := ExportAgeIdentity(nil)
+	if err == nil {
+		t.Error("expected error for nil handle")
 	}
 }

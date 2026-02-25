@@ -216,6 +216,179 @@ void genesis_free(struct GenesisHandle handle);
  */
 void genesis_free_string(char *s);
 
+#if defined(GENESIS_PQ)
+/**
+ * Generate a full PQ keypair set (age + ML-KEM-1024 + ML-DSA-87).
+ *
+ * Returns a [`GenesisResult`] with `data_json` containing the public keys
+ * as JSON. The private keys are stored in the returned handle.
+ *
+ * # Safety
+ *
+ * No preconditions. The returned handle must eventually be freed.
+ */
+struct GenesisResult genesis_generate_keyset(void);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Free a GenesisKeySet allocated by `genesis_generate_keyset`.
+ *
+ * # Safety
+ *
+ * `ptr` must be a pointer returned by `genesis_generate_keyset`, or NULL.
+ */
+void genesis_free_keyset(void *ptr);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Seal plaintext into a hybrid envelope (V2).
+ *
+ * Returns the serialized envelope bytes via `out` / `out_len`.
+ * The caller is responsible for freeing `*out` with `genesis_free_string`
+ * (reinterpret as `*mut c_char`).
+ *
+ * # Safety
+ *
+ * - `plaintext` must be a valid pointer with at least `plaintext_len` bytes.
+ * - `age_recipient` must be a NUL-terminated C string.
+ * - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`.
+ * - `out` and `out_len` must be valid pointers.
+ */
+struct GenesisResult genesis_seal_hybrid(void *keyset_ptr,
+                                         const uint8_t *plaintext,
+                                         uintptr_t plaintext_len,
+                                         uint8_t **out,
+                                         uintptr_t *out_len);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Open a hybrid envelope (V2), recovering the plaintext.
+ *
+ * # Safety
+ *
+ * - `keyset_ptr` must be a valid keyset pointer.
+ * - `envelope` must point to at least `envelope_len` bytes of a serialized V2 envelope.
+ * - `out` and `out_len` must be valid pointers.
+ */
+struct GenesisResult genesis_open_hybrid(void *keyset_ptr,
+                                         const uint8_t *envelope,
+                                         uintptr_t envelope_len,
+                                         uint8_t **out,
+                                         uintptr_t *out_len);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Initialize a hybrid keyset from a provider type and config JSON.
+ *
+ * This is the spec-mandated entry point for hybrid PQ init. It generates
+ * a full [`GenesisKeySet`] (age + ML-KEM-1024 + ML-DSA-87) and returns
+ * the keyset as an opaque handle with the public keys JSON in `data_json`.
+ *
+ * Functionally equivalent to [`genesis_generate_keyset`] but accepts
+ * provider/config arguments for forward compatibility.
+ *
+ * # Safety
+ *
+ * - `provider` must be a NUL-terminated C string (or NULL, ignored).
+ * - `config_json` must be a NUL-terminated C string (or NULL, ignored).
+ * - The returned handle must eventually be freed with `genesis_free_keyset`.
+ */
+struct GenesisResult genesis_init_hybrid(const char *_provider, const char *_config_json);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Extract the public keys JSON from a keyset handle.
+ *
+ * The handle is NOT consumed -- callers may continue to use it for
+ * sealing/opening operations after retrieving the public keys.
+ *
+ * Returns a [`GenesisResult`] with `data_json` containing the public
+ * keys as JSON (`age_recipient`, `mlkem_public_key`, `signing_public_key`).
+ *
+ * # Safety
+ *
+ * - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`
+ *   or `genesis_init_hybrid`, or NULL (returns error).
+ */
+struct GenesisResult genesis_get_public_keys(void *keyset_ptr);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Load a [`LocalKmsProvider`] from an existing master key envelope on disk.
+ *
+ * The identity keys needed to decrypt the envelope are taken from the
+ * provided keyset handle (`keyset_ptr`). The keyset is NOT consumed.
+ *
+ * Returns a [`GenesisResult`] with the [`LocalKmsProvider`] as an opaque
+ * handle. Free with `genesis_free_local_kms`.
+ *
+ * # Safety
+ *
+ * - `keyset_ptr` must be a valid keyset pointer from `genesis_generate_keyset`
+ *   or `genesis_init_hybrid`.
+ * - `envelope_path` must be a NUL-terminated C string pointing to a readable
+ *   hybrid-envelope file on disk.
+ */
+struct GenesisResult genesis_init_local(void *keyset_ptr, const char *envelope_path);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Generate a new [`LocalKmsProvider`] with a random master key.
+ *
+ * The master key is sealed into a hybrid envelope using the keyset's
+ * public keys and signing key, then written to `envelope_path` on disk.
+ * Returns the initialized provider as an opaque handle.
+ *
+ * # Safety
+ *
+ * - `keyset_ptr` must be a valid keyset pointer from `genesis_generate_keyset`
+ *   or `genesis_init_hybrid`.
+ * - `envelope_path` must be a NUL-terminated C string pointing to a writable
+ *   location on disk.
+ * - `config_json` must be a NUL-terminated C string (or NULL, ignored --
+ *   reserved for future configuration).
+ */
+struct GenesisResult genesis_generate_local(void *keyset_ptr,
+                                            const char *envelope_path,
+                                            const char *_config_json);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Free a [`LocalKmsProvider`] allocated by `genesis_init_local` or
+ * `genesis_generate_local`.
+ *
+ * # Safety
+ *
+ * `ptr` must be a pointer returned by `genesis_init_local` or
+ * `genesis_generate_local`, or NULL.
+ */
+void genesis_free_local_kms(void *ptr);
+#endif
+
+#if defined(GENESIS_PQ)
+/**
+ * Export the age identity (private key string) from a keyset handle.
+ *
+ * The age identity is needed by the Go host to write an identity file
+ * for SOPS decryption.  Returns a [`GenesisResult`] with the age
+ * identity string in `data_json` (format: `AGE-SECRET-KEY-1...`).
+ *
+ * # Safety
+ *
+ * - `keyset_ptr` must be a valid pointer from `genesis_generate_keyset`
+ *   or `genesis_init_hybrid`, or NULL (returns error).
+ */
+struct GenesisResult genesis_export_age_identity(void *keyset_ptr);
+#endif
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

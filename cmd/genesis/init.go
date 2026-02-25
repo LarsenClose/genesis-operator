@@ -16,19 +16,20 @@ import (
 )
 
 var (
-	initProvider    string
-	initKeyArn      string
-	initKeyName     string
-	initVaultURL    string
-	initAzKeyName   string
-	initAzKeyVer    string
-	initOCIKeyOCID  string
-	initOCICryptoEP string
-	initYubiSlot    string
-	initYubiFP      string
-	initTPMDevice   string
-	initTPMPCRs     string
-	initOutput      string
+	initProvider     string
+	initKeyArn       string
+	initKeyName      string
+	initVaultURL     string
+	initAzKeyName    string
+	initAzKeyVer     string
+	initOCIKeyOCID   string
+	initOCICryptoEP  string
+	initYubiSlot     string
+	initYubiFP       string
+	initTPMDevice    string
+	initTPMPCRs      string
+	initOutput       string
+	initEnvelopePath string
 )
 
 var initCmd = &cobra.Command{
@@ -47,7 +48,8 @@ Example:
 }
 
 func init() {
-	initCmd.Flags().StringVar(&initProvider, "provider", "", "KMS provider (aws-kms, gcp-kms, azure-keyvault, oci-vault, yubikey, tpm)")
+	initCmd.Flags().StringVar(&initProvider, "provider", "", "KMS provider (aws-kms, gcp-kms, azure-keyvault, oci-vault, yubikey, tpm, local)")
+	initCmd.Flags().StringVar(&initEnvelopePath, "envelope-path", "", "Path for local master key envelope (required for local provider)")
 	initCmd.Flags().StringVar(&initKeyArn, "key-arn", "", "AWS KMS key ARN")
 	initCmd.Flags().StringVar(&initKeyName, "key-name", "", "GCP KMS key name (projects/{project}/locations/{loc}/keyRings/{ring}/cryptoKeys/{key})")
 	initCmd.Flags().StringVar(&initVaultURL, "vault-url", "", "Azure Key Vault URL (https://{vault}.vault.azure.net)")
@@ -74,6 +76,22 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if err := os.MkdirAll(initOutput, 0750); err != nil {
+		printError(fmt.Errorf("failed to create output directory: %w", err))
+		return err
+	}
+
+	// Local provider uses a completely different flow: PQ hybrid keyset +
+	// local master key envelope on disk, bypassing the cloud KMS state machine.
+	if kms.ProviderName(initProvider) == kms.ProviderLocal {
+		return runInitLocal()
+	}
+
+	return runInitCloudKMS()
+}
+
+// runInitCloudKMS handles the standard cloud KMS init flow.
+func runInitCloudKMS() error {
 	genesisConfigJSON := buildGenesisConfigJSON(initProvider)
 	h, err := bridge.New(genesisConfigJSON)
 	if err != nil {
@@ -90,11 +108,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	verboseLog("Generated public key: %s", artifacts.PublicKey)
-
-	if err := os.MkdirAll(initOutput, 0750); err != nil {
-		printError(fmt.Errorf("failed to create output directory: %w", err))
-		return err
-	}
 
 	bootstrapConfig := buildBootstrapConfigFromArtifacts(artifacts)
 	bootstrapPath := filepath.Join(initOutput, "genesis-bootstrap.yaml")
@@ -138,11 +151,133 @@ func runInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runInitLocal handles the local (standalone, no cloud KMS) init flow.
+// Generates a PQ hybrid keyset, creates a master key envelope on disk,
+// and writes the age identity to an identity file for SOPS.
+func runInitLocal() error {
+	verboseLog("Generating PQ hybrid keyset...")
+	keyset, pubKeys, err := bridge.GenerateKeySet()
+	if err != nil {
+		printError(fmt.Errorf("failed to generate keyset: %w", err))
+		return err
+	}
+	defer bridge.FreeKeySet(keyset)
+
+	verboseLog("Creating local master key envelope at: %s", initEnvelopePath)
+	localKms, err := bridge.GenerateLocal(keyset, initEnvelopePath)
+	if err != nil {
+		printError(fmt.Errorf("failed to generate local KMS: %w", err))
+		return err
+	}
+	defer bridge.FreeLocalKms(localKms)
+
+	verboseLog("Exporting age identity for SOPS...")
+	ageIdentity, err := bridge.ExportAgeIdentity(keyset)
+	if err != nil {
+		printError(fmt.Errorf("failed to export age identity: %w", err))
+		return err
+	}
+
+	// Write the age identity to a secure file (600 permissions).
+	// The operator MUST keep this file safe — it is the SOPS decryption key.
+	identityPath := filepath.Join(initOutput, "genesis-identity.key")
+	verboseLog("Writing age identity to: %s", identityPath)
+	if err := os.WriteFile(identityPath, []byte(ageIdentity+"\n"), 0600); err != nil { // #nosec G306 -- identity file permissions are intentionally restrictive
+		printError(fmt.Errorf("failed to write identity file: %w", err))
+		return err
+	}
+
+	// Build bootstrap config with PQ public keys
+	bootstrapConfig := buildLocalBootstrapConfig(pubKeys, initEnvelopePath)
+	bootstrapPath := filepath.Join(initOutput, "genesis-bootstrap.yaml")
+	verboseLog("Writing bootstrap config to: %s", bootstrapPath)
+	if err := config.Save(bootstrapPath, bootstrapConfig); err != nil {
+		printError(fmt.Errorf("failed to write bootstrap config: %w", err))
+		return err
+	}
+
+	sopsConfig := config.NewSOPSConfig(pubKeys.AgeRecipient)
+	sopsPath := filepath.Join(initOutput, ".sops.yaml")
+	verboseLog("Writing SOPS config to: %s", sopsPath)
+	if err := sopsConfig.Save(sopsPath); err != nil {
+		printError(fmt.Errorf("failed to write SOPS config: %w", err))
+		return err
+	}
+
+	result := InitResult{
+		PublicKey:     pubKeys.AgeRecipient,
+		Provider:      initProvider,
+		BootstrapFile: bootstrapPath,
+		SOPSFile:      sopsPath,
+		IdentityFile:  identityPath,
+	}
+
+	if jsonOutput {
+		printOutput(result)
+	} else {
+		fmt.Println("Genesis initialized successfully (local PQ mode)!")
+		fmt.Println()
+		fmt.Printf("  Public Key:       %s\n", result.PublicKey)
+		fmt.Printf("  ML-KEM Public:    %s...\n", truncate(pubKeys.MLKEMPublicKey, 32))
+		fmt.Printf("  ML-DSA Public:    %s...\n", truncate(pubKeys.SigningPublicKey, 32))
+		fmt.Printf("  Provider:         %s\n", result.Provider)
+		fmt.Printf("  Bootstrap File:   %s\n", result.BootstrapFile)
+		fmt.Printf("  SOPS Config:      %s\n", result.SOPSFile)
+		fmt.Printf("  Identity File:    %s\n", result.IdentityFile)
+		fmt.Printf("  Envelope File:    %s\n", initEnvelopePath)
+		fmt.Println()
+		fmt.Println("IMPORTANT: Keep genesis-identity.key safe! It is the SOPS decryption key.")
+		fmt.Println("           Do NOT commit it to version control.")
+		fmt.Println()
+		fmt.Println("Next steps:")
+		fmt.Println("  1. Store genesis-identity.key securely (e.g., password manager)")
+		fmt.Println("  2. Commit genesis-bootstrap.yaml and .sops.yaml to git")
+		fmt.Println("  3. Set SOPS_AGE_KEY_FILE to the identity file path")
+		fmt.Println("  4. Use 'genesis seal' to encrypt secrets with SOPS")
+	}
+
+	return nil
+}
+
+// buildLocalBootstrapConfig creates a BootstrapConfig for the local provider.
+func buildLocalBootstrapConfig(pubKeys *bridge.HybridPublicKeys, envelopePath string) *config.BootstrapConfig {
+	return &config.BootstrapConfig{
+		APIVersion: config.APIVersion,
+		Kind:       config.KindBootstrap,
+		Metadata: config.Metadata{
+			Name:      "genesis-bootstrap",
+			Namespace: "genesis-system",
+		},
+		Spec: config.BootstrapSpec{
+			Envelope: config.EnvelopeSpec{
+				Provider:        kms.ProviderLocal,
+				PublicKey:       pubKeys.AgeRecipient,
+				MLKEMPublicKey:  pubKeys.MLKEMPublicKey,
+				SigningPublicKey: pubKeys.SigningPublicKey,
+				EnvelopePath:    envelopePath,
+			},
+			Output: config.OutputSpec{
+				SecretName:      "sops-age",
+				SecretNamespace: "flux-system",
+				SecretKey:       "age.agekey",
+			},
+		},
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 type InitResult struct {
 	PublicKey     string `json:"publicKey"`
 	Provider      string `json:"provider"`
 	BootstrapFile string `json:"bootstrapFile"`
 	SOPSFile      string `json:"sopsFile"`
+	IdentityFile  string `json:"identityFile,omitempty"`
 }
 
 // validateInitProviderFlags checks that the required CLI flags for the given
@@ -175,6 +310,10 @@ func validateInitProviderFlags() error {
 		if _, err := parsePCRs(initTPMPCRs); err != nil {
 			return fmt.Errorf("invalid PCR selection: %w", err)
 		}
+	case kms.ProviderLocal:
+		if initEnvelopePath == "" {
+			return fmt.Errorf("--envelope-path is required for local provider")
+		}
 	case kms.ProviderYubiKey, kms.ProviderMock:
 		// No required flags beyond what cobra enforces.
 	default:
@@ -197,6 +336,8 @@ func bridgeProviderType(goProvider string) string {
 		return "azure"
 	case kms.ProviderMock:
 		return "mock"
+	case kms.ProviderLocal:
+		return "local"
 	default:
 		// OCI, YubiKey, TPM -- pass through the Go name; the Rust side
 		// will reject unsupported providers with a clear error.
