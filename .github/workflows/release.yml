@@ -33,7 +33,7 @@ jobs:
           workspaces: genesis-core
 
       - name: Build Rust static library
-        run: cd genesis-core && cargo build --release
+        run: cd genesis-core && cargo build --release --features mock
 
       - name: Generate C header
         run: |
@@ -106,6 +106,9 @@ jobs:
   docker-arm64:
     name: Docker (arm64)
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
