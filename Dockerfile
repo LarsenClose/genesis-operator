@@ -68,6 +68,10 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build \
 # Stage 3: Runtime (distroless)
 FROM gcr.io/distroless/static:nonroot
 
+LABEL org.opencontainers.image.source="https://github.com/LarsenClose/genesis-operator"
+LABEL org.opencontainers.image.description="Genesis Operator - GitOps secrets bootstrap for Kubernetes"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
 WORKDIR /
 
 COPY --from=go-builder /workspace/manager .
