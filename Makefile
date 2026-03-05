@@ -23,10 +23,13 @@ RUST_DIR := genesis-core
 RUST_LIB := $(RUST_DIR)/target/release/libgenesis_core.a
 RUST_HEADER := internal/bridge/genesis_core.h
 
-.PHONY: rust-build rust-test rust-lint rust-header rust-clean rust-audit
+.PHONY: rust-build rust-build-test rust-test rust-lint rust-header rust-clean rust-audit
 
 rust-build: ## Build the Rust static library
 	cd $(RUST_DIR) && cargo build --release
+
+rust-build-test: ## Build Rust static library with mock feature for testing
+	cd $(RUST_DIR) && cargo build --release --features mock
 
 rust-test: ## Run Rust tests
 	cd $(RUST_DIR) && cargo test
@@ -85,7 +88,7 @@ COVERAGE_EXCLUDE_PATTERN := "(pkg/api/v1alpha1|cmd/operator|internal/kms/mock)$$
 COVERAGE_PACKAGES := $(shell go list ./... | grep -v -E $(COVERAGE_EXCLUDE_PATTERN))
 
 .PHONY: test
-test: rust-test ## Run unit tests
+test: rust-build-test rust-test ## Run unit tests
 	go test ./... -v -coverprofile=coverage.out
 
 .PHONY: test-coverage
@@ -93,7 +96,7 @@ test-coverage: test ## Run tests with coverage report
 	go tool cover -html=coverage.out -o coverage.html
 
 .PHONY: test-filtered
-test-filtered: ## Run unit tests with filtered coverage (excludes generated code)
+test-filtered: rust-build-test ## Run unit tests with filtered coverage (excludes generated code)
 	go test $(COVERAGE_PACKAGES) -v -coverprofile=coverage-filtered.out
 	@echo "Coverage report (excluding auto-generated code):"
 	@go tool cover -func=coverage-filtered.out | tail -1
