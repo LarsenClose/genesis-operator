@@ -11,4 +11,5 @@ pub mod inject;
 // for ergonomic imports: `use genesis_core::k8s::SecretInjector;`
 pub use inject::MockSecretInjector;
 pub use inject::SecretInjector;
+pub use inject::SecretMetadata;
 pub use inject::UreqSecretInjector;

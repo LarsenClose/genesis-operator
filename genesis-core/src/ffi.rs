@@ -630,12 +630,18 @@ pub unsafe extern "C" fn genesis_inject_secret(
             }
         };
 
-        match bootstrapping.inject_secret(&*injector, name, ns, key) {
+        // Build metadata from the bootstrapping state's config for secret enrichment.
+        let metadata = crate::k8s::SecretMetadata {
+            provider_type: Some(bootstrapping.config_ref().provider_type.clone()),
+            public_key: bootstrapping.config_ref().public_key.clone(),
+        };
+
+        match bootstrapping.inject_secret_with_metadata(&*injector, name, ns, key, Some(&metadata)) {
             Ok(active) => {
                 let new_inner = GenesisInner::Active(active);
                 success_result(inner_to_handle(new_inner))
             }
-            // inject_secret() consumes bootstrapping -- no state to return.
+            // inject_secret_with_metadata() consumes bootstrapping -- no state to return.
             Err(e) => error_result(e.error_code(), &e.to_string()),
         }
     })

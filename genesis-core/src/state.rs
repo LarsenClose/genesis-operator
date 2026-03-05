@@ -340,15 +340,27 @@ impl GenesisBootstrapping {
     ///
     /// Consumes `self`; the key material is zeroed when `KeyMaterial` drops.
     pub fn inject_secret(
-        mut self,
+        self,
         injector: &dyn SecretInjector,
         name: &str,
         ns: &str,
         key: &str,
     ) -> Result<Genesis<Active>, GenesisError> {
+        self.inject_secret_with_metadata(injector, name, ns, key, None)
+    }
+
+    /// Inject with optional metadata for labels/annotations on the K8s Secret.
+    pub fn inject_secret_with_metadata(
+        mut self,
+        injector: &dyn SecretInjector,
+        name: &str,
+        ns: &str,
+        key: &str,
+        metadata: Option<&crate::k8s::SecretMetadata>,
+    ) -> Result<Genesis<Active>, GenesisError> {
         let key_material = self.key_material.take().ok_or(GenesisError::NoEnvelope)?;
 
-        injector.inject(key_material.as_bytes(), name, ns, key)?;
+        injector.inject(key_material.as_bytes(), name, ns, key, metadata)?;
 
         let inner = self
             .inner
@@ -368,6 +380,18 @@ impl GenesisBootstrapping {
             audit: inner.audit,
             _state: PhantomData,
         })
+    }
+
+    /// Borrow the config from the inner state (read-only).
+    ///
+    /// Used by FFI callers to extract metadata (provider_type, public_key)
+    /// for secret enrichment.
+    pub fn config_ref(&self) -> &GenesisConfig {
+        &self
+            .inner
+            .as_ref()
+            .expect("inner consumed before config_ref")
+            .config
     }
 
     /// Emit an audit event through the inner state machine's audit sink.
@@ -458,8 +482,14 @@ impl Genesis<Rotating> {
         // Encrypt new private key with KMS.
         let new_envelope = kms.encrypt(new_key_material.as_bytes())?;
 
+        // Build metadata for secret enrichment during rotation.
+        let metadata = crate::k8s::SecretMetadata {
+            provider_type: Some(self.config.provider_type.clone()),
+            public_key: Some(new_public_key.clone()),
+        };
+
         // Inject new private key into K8s.
-        injector.inject(new_key_material.as_bytes(), name, ns, key)?;
+        injector.inject(new_key_material.as_bytes(), name, ns, key, Some(&metadata))?;
 
         let sops_config = format!("creation_rules:\n  - age: \"{}\"\n", new_public_key);
 
