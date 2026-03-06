@@ -89,7 +89,7 @@ COVERAGE_PACKAGES := $(shell go list ./... | grep -v -E $(COVERAGE_EXCLUDE_PATTE
 
 .PHONY: test
 test: rust-build-test rust-test ## Run unit tests
-	go test ./... -v -coverprofile=coverage.out
+	go test -tags genesis_mock ./... -v -coverprofile=coverage.out
 
 .PHONY: test-coverage
 test-coverage: test ## Run tests with coverage report
@@ -97,7 +97,7 @@ test-coverage: test ## Run tests with coverage report
 
 .PHONY: test-filtered
 test-filtered: rust-build-test ## Run unit tests with filtered coverage (excludes generated code)
-	go test $(COVERAGE_PACKAGES) -v -coverprofile=coverage-filtered.out
+	go test -tags genesis_mock $(COVERAGE_PACKAGES) -v -coverprofile=coverage-filtered.out
 	@echo "Coverage report (excluding auto-generated code):"
 	@go tool cover -func=coverage-filtered.out | tail -1
 
