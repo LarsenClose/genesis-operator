@@ -175,7 +175,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.1.6
         env:
           CGO_ENABLED: "1"
 

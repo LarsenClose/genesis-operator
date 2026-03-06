@@ -1,7 +1,7 @@
 # Version defaults -- keep in sync with rust-toolchain.toml and go.mod
 # Override at build time: docker build --build-arg RUST_VERSION=1.93 ...
 ARG RUST_VERSION=1.92
-ARG GO_VERSION=1.24
+ARG GO_VERSION=1.26
 
 # Stage 1: Rust build
 FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-alpine AS rust-builder

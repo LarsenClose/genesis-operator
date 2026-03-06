@@ -1,6 +1,6 @@
 module github.com/larsenclose/genesis
 
-go 1.25.8
+go 1.26.1
 
 require (
 	cloud.google.com/go/kms v1.24.0
