@@ -38,9 +38,15 @@ pub fn create_provider(config: &KmsConfig) -> Result<Box<dyn KmsProvider>, Genes
         "null" => Ok(Box::new(super::NullKmsProvider)),
         #[cfg(not(any(test, feature = "mock")))]
         "mock" | "null" => Err(GenesisError::KmsNotConfigured),
-        "aws" => Ok(Box::new(super::aws::AwsKmsProvider::from_env()?)),
-        "gcp" => Ok(Box::new(super::gcp::GcpKmsProvider::from_env()?)),
-        "azure" => Ok(Box::new(super::azure::AzureKeyVaultProvider::from_env()?)),
+        "aws" => Ok(Box::new(super::aws::AwsKmsProvider::from_config(
+            &config.settings,
+        )?)),
+        "gcp" => Ok(Box::new(super::gcp::GcpKmsProvider::from_config(
+            &config.settings,
+        )?)),
+        "azure" => Ok(Box::new(super::azure::AzureKeyVaultProvider::from_config(
+            &config.settings,
+        )?)),
         // "local" provider requires identity keys; use LocalKmsProvider::from_envelope() directly.
         "local" => Err(GenesisError::KmsCallFailed(
             "local provider requires identity keys; use LocalKmsProvider::from_envelope()".into(),

@@ -98,6 +98,59 @@ impl AwsKmsProvider {
         )
     }
 
+    /// Create a new AWS KMS provider from JSON settings.
+    ///
+    /// Expected fields:
+    /// - `key_arn` (required)
+    /// - `region` (required)
+    /// - `access_key_id` (required)
+    /// - `secret_access_key` (required)
+    /// - `session_token` (optional)
+    ///
+    /// Falls back to `from_env()` if credentials are not present in settings.
+    pub fn from_config(settings: &serde_json::Value) -> Result<Self, GenesisError> {
+        let key_arn = settings
+            .get("key_arn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let region = settings
+            .get("region")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let access_key_id = settings
+            .get("access_key_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let secret_access_key = settings
+            .get("secret_access_key")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let session_token = settings
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // If credentials are present in settings, use them directly.
+        if access_key_id.is_some() && secret_access_key.is_some() {
+            return Self::from_env_vars(
+                access_key_id,
+                secret_access_key,
+                region,
+                key_arn,
+                session_token,
+            );
+        }
+
+        // Fall back to env vars, using key_arn/region from settings if available.
+        Self::from_env_vars(
+            env::var("AWS_ACCESS_KEY_ID").ok(),
+            env::var("AWS_SECRET_ACCESS_KEY").ok(),
+            region.or_else(|| env::var("AWS_DEFAULT_REGION").ok()),
+            key_arn.or_else(|| env::var("GENESIS_AWS_KMS_KEY_ARN").ok()),
+            env::var("AWS_SESSION_TOKEN").ok(),
+        )
+    }
+
     /// Internal constructor from explicit `Option` values, used by
     /// [`from_env`](Self::from_env) and testable without touching the
     /// process environment.
@@ -549,5 +602,61 @@ mod tests {
     fn is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AwsKmsProvider>();
+    }
+
+    // ── from_config tests ───────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_all_fields() {
+        let settings = serde_json::json!({
+            "key_arn": "arn:aws:kms:us-west-2:123:key/abc",
+            "region": "us-west-2",
+            "access_key_id": "AKID_FROM_CONFIG",
+            "secret_access_key": "SK_FROM_CONFIG",
+            "session_token": "TOK_FROM_CONFIG"
+        });
+        let p = AwsKmsProvider::from_config(&settings).expect("should succeed");
+        assert_eq!(p.access_key_id, "AKID_FROM_CONFIG");
+        assert_eq!(p.secret_access_key, "SK_FROM_CONFIG");
+        assert_eq!(p.region, "us-west-2");
+        assert_eq!(p.key_arn, "arn:aws:kms:us-west-2:123:key/abc");
+        assert_eq!(p.session_token.as_deref(), Some("TOK_FROM_CONFIG"));
+    }
+
+    #[test]
+    fn from_config_without_session_token() {
+        let settings = serde_json::json!({
+            "key_arn": "arn:aws:kms:eu-west-1:456:key/def",
+            "region": "eu-west-1",
+            "access_key_id": "AKID",
+            "secret_access_key": "SK"
+        });
+        let p = AwsKmsProvider::from_config(&settings).expect("should succeed");
+        assert!(p.session_token.is_none());
+        assert_eq!(p.region, "eu-west-1");
+    }
+
+    #[test]
+    fn from_config_missing_credentials_falls_back_to_env() {
+        // Only key_arn and region in settings, no credentials.
+        // Without env vars set, this should fail with KmsNotConfigured.
+        let settings = serde_json::json!({
+            "key_arn": "arn:aws:kms:us-east-1:789:key/ghi",
+            "region": "us-east-1"
+        });
+        let result = AwsKmsProvider::from_config(&settings);
+        // Should fail because env vars are not set in test environment.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_config_missing_key_arn_fails() {
+        let settings = serde_json::json!({
+            "region": "us-east-1",
+            "access_key_id": "AKID",
+            "secret_access_key": "SK"
+        });
+        let result = AwsKmsProvider::from_config(&settings);
+        assert!(result.is_err());
     }
 }

@@ -51,10 +51,7 @@ impl SecretMetadata {
         let mut annotations = HashMap::new();
         if let Some(ref pk) = self.public_key {
             let fingerprint: String = pk.chars().take(12).collect();
-            annotations.insert(
-                "genesis.io/public-key-fingerprint".to_string(),
-                fingerprint,
-            );
+            annotations.insert("genesis.io/public-key-fingerprint".to_string(), fingerprint);
         }
         annotations
     }
@@ -132,7 +129,10 @@ impl MockSecretInjector {
     /// Return a snapshot of all logged metadata for test assertions.
     /// Key format: `"{namespace}/{name}"`.
     pub fn metadata_snapshot(&self) -> HashMap<String, SecretMetadata> {
-        self.metadata_log.lock().expect("mock lock poisoned").clone()
+        self.metadata_log
+            .lock()
+            .expect("mock lock poisoned")
+            .clone()
     }
 
     /// Compound key used for internal storage.
@@ -255,9 +255,7 @@ impl UreqSecretInjector {
     }
 
     /// Build a rustls ClientConfig with the provided PEM CA certificate.
-    fn build_tls_config(
-        ca_cert_pem: &[u8],
-    ) -> Result<rustls::ClientConfig, GenesisError> {
+    fn build_tls_config(ca_cert_pem: &[u8]) -> Result<rustls::ClientConfig, GenesisError> {
         let mut root_store = rustls::RootCertStore::empty();
 
         let mut reader = std::io::BufReader::new(ca_cert_pem);
@@ -272,9 +270,9 @@ impl UreqSecretInjector {
         }
 
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                GenesisError::K8sAuthFailed(format!("failed to add CA cert: {e}"))
-            })?;
+            root_store
+                .add(cert)
+                .map_err(|e| GenesisError::K8sAuthFailed(format!("failed to add CA cert: {e}")))?;
         }
 
         let config = rustls::ClientConfig::builder()
@@ -347,7 +345,13 @@ impl SecretInjector for UreqSecretInjector {
         secret_key: &str,
         metadata: Option<&SecretMetadata>,
     ) -> Result<(), GenesisError> {
-        let body = self.secret_body(key_bytes, secret_name, secret_namespace, secret_key, metadata);
+        let body = self.secret_body(
+            key_bytes,
+            secret_name,
+            secret_namespace,
+            secret_key,
+            metadata,
+        );
         let url = self.secrets_collection_url(secret_namespace);
 
         // Attempt POST (create).
@@ -486,7 +490,9 @@ mod tests {
             .expect("inject should succeed");
 
         let meta_snap = mock.metadata_snapshot();
-        let stored = meta_snap.get("default/my-secret").expect("metadata should exist");
+        let stored = meta_snap
+            .get("default/my-secret")
+            .expect("metadata should exist");
         assert_eq!(stored.provider_type.as_deref(), Some("aws-kms"));
         assert_eq!(stored.public_key.as_deref(), Some("age1abcdefghij"));
     }
@@ -498,7 +504,10 @@ mod tests {
             public_key: None,
         };
         let labels = meta.labels();
-        assert_eq!(labels.get("app.kubernetes.io/managed-by").unwrap(), "genesis-operator");
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by").unwrap(),
+            "genesis-operator"
+        );
         assert_eq!(labels.get("app.kubernetes.io/part-of").unwrap(), "genesis");
         assert_eq!(labels.get("genesis.io/provider").unwrap(), "oci-vault");
     }
@@ -511,7 +520,9 @@ mod tests {
         };
         let annotations = meta.annotations();
         assert_eq!(
-            annotations.get("genesis.io/public-key-fingerprint").unwrap(),
+            annotations
+                .get("genesis.io/public-key-fingerprint")
+                .unwrap(),
             "age1abcdefgh"
         );
     }
@@ -521,6 +532,9 @@ mod tests {
         let meta = SecretMetadata::default();
         let labels = meta.labels();
         assert!(!labels.contains_key("genesis.io/provider"));
-        assert_eq!(labels.get("app.kubernetes.io/managed-by").unwrap(), "genesis-operator");
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by").unwrap(),
+            "genesis-operator"
+        );
     }
 }

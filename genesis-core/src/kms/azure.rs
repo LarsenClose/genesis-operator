@@ -95,6 +95,46 @@ impl AzureKeyVaultProvider {
         Ok(Self::new(vault_url, key_name, key_version, access_token))
     }
 
+    /// Create a provider from JSON settings.
+    ///
+    /// Expected fields:
+    /// - `vault_url` (optional -- falls back to `AZURE_KEY_VAULT_URL` env var)
+    /// - `key_name` (optional -- falls back to `AZURE_KEY_NAME` env var)
+    /// - `key_version` (optional -- falls back to `AZURE_KEY_VERSION` env var)
+    /// - `access_token` (optional -- falls back to `AZURE_ACCESS_TOKEN` env var)
+    ///
+    /// If neither settings nor env vars provide a required value, returns an error.
+    pub fn from_config(settings: &serde_json::Value) -> Result<Self, GenesisError> {
+        let vault_url = settings
+            .get("vault_url")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("AZURE_KEY_VAULT_URL").ok())
+            .ok_or_else(|| GenesisError::KmsCallFailed("vault_url not configured".into()))?;
+
+        let key_name = settings
+            .get("key_name")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("AZURE_KEY_NAME").ok())
+            .ok_or_else(|| GenesisError::KmsCallFailed("key_name not configured".into()))?;
+
+        let key_version = settings
+            .get("key_version")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("AZURE_KEY_VERSION").ok());
+
+        let access_token = settings
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("AZURE_ACCESS_TOKEN").ok())
+            .ok_or_else(|| GenesisError::KmsCallFailed("access_token not configured".into()))?;
+
+        Ok(Self::new(vault_url, key_name, key_version, access_token))
+    }
+
     /// Build the URL for the encrypt or decrypt operation.
     fn operation_url(&self, operation: &str) -> String {
         let version_segment = self.key_version.as_deref().unwrap_or("");
@@ -358,6 +398,57 @@ mod tests {
 
         // Final cleanup.
         clear_env();
+    }
+
+    // ── from_config tests ────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_all_fields() {
+        let settings = serde_json::json!({
+            "vault_url": "https://myvault.vault.azure.net",
+            "key_name": "my-key",
+            "key_version": "v1",
+            "access_token": "config-token"
+        });
+        let p = AzureKeyVaultProvider::from_config(&settings).expect("should succeed");
+        assert_eq!(p.vault_url, "https://myvault.vault.azure.net");
+        assert_eq!(p.key_name, "my-key");
+        assert_eq!(p.key_version.as_deref(), Some("v1"));
+        assert_eq!(p.access_token, "config-token");
+    }
+
+    #[test]
+    fn from_config_without_version() {
+        let settings = serde_json::json!({
+            "vault_url": "https://myvault.vault.azure.net",
+            "key_name": "my-key",
+            "access_token": "token"
+        });
+        std::env::remove_var("AZURE_KEY_VERSION");
+        let p = AzureKeyVaultProvider::from_config(&settings).expect("should succeed");
+        assert!(p.key_version.is_none());
+    }
+
+    #[test]
+    fn from_config_missing_vault_url_fails() {
+        std::env::remove_var("AZURE_KEY_VAULT_URL");
+        let settings = serde_json::json!({
+            "key_name": "my-key",
+            "access_token": "token"
+        });
+        let result = AzureKeyVaultProvider::from_config(&settings);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_config_missing_access_token_fails() {
+        std::env::remove_var("AZURE_ACCESS_TOKEN");
+        let settings = serde_json::json!({
+            "vault_url": "https://myvault.vault.azure.net",
+            "key_name": "my-key"
+        });
+        let result = AzureKeyVaultProvider::from_config(&settings);
+        assert!(result.is_err());
     }
 
     #[test]

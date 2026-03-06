@@ -395,6 +395,11 @@ func (r *GenesisBootstrapReconciler) decryptEnvelope(ctx context.Context, provid
 	}
 
 	// --- Bridge: load envelope into Rust state machine for validation ---
+	// bridge.New takes a GenesisConfig JSON (provider_type + provider_config).
+	// The mock provider is used because the bridge is only used for state tracking
+	// and key validation here; actual KMS decryption happens via the Go provider.
+	// Phase 4 will migrate to bridge.BeginBootstrap + bridge.InjectSecret using
+	// bridge.BuildKmsConfigJSON for the KmsConfig JSON payload.
 	handle, err := bridge.New(`{"provider_type":"mock","provider_config":{}}`)
 	if err != nil {
 		return "", fmt.Errorf("failed to create genesis handle: %w", err)

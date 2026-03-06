@@ -107,6 +107,35 @@ impl GcpKmsProvider {
         Ok(Self::new(key_resource_name, access_token))
     }
 
+    /// Create a provider from JSON settings.
+    ///
+    /// Expected fields:
+    /// - `key_resource_name` (optional -- falls back to `GENESIS_GCP_KMS_KEY` env var)
+    /// - `access_token` (optional -- falls back to `GENESIS_GCP_ACCESS_TOKEN` env var)
+    ///
+    /// If neither settings nor env vars provide a required value, returns an error.
+    pub fn from_config(settings: &serde_json::Value) -> Result<Self, GenesisError> {
+        let key_resource_name = settings
+            .get("key_resource_name")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("GENESIS_GCP_KMS_KEY").ok())
+            .ok_or(GenesisError::KmsNotConfigured)?;
+
+        let access_token = settings
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("GENESIS_GCP_ACCESS_TOKEN").ok())
+            .ok_or_else(|| {
+                GenesisError::KmsCallFailed(
+                    "access_token not in settings and GENESIS_GCP_ACCESS_TOKEN not set".into(),
+                )
+            })?;
+
+        Ok(Self::new(key_resource_name, access_token))
+    }
+
     /// The full CryptoKey resource name.
     pub fn key_resource_name(&self) -> &str {
         &self.key_resource_name
@@ -225,6 +254,45 @@ mod tests {
     }
 
     // ── Env-mutating tests (serialized via ENV_MUTEX) ────────────────
+
+    // ── from_config tests ────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_all_fields() {
+        let settings = serde_json::json!({
+            "key_resource_name": TEST_KEY,
+            "access_token": TEST_TOKEN
+        });
+        let p = GcpKmsProvider::from_config(&settings).expect("should succeed");
+        assert_eq!(p.key_resource_name(), TEST_KEY);
+        assert_eq!(p.access_token, TEST_TOKEN);
+    }
+
+    #[test]
+    fn from_config_missing_key_falls_back_to_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_gcp_env();
+        // No key in settings, no env var -> should fail
+        let settings = serde_json::json!({
+            "access_token": TEST_TOKEN
+        });
+        let result = GcpKmsProvider::from_config(&settings);
+        assert!(result.is_err());
+        clear_gcp_env();
+    }
+
+    #[test]
+    fn from_config_missing_token_fails() {
+        let settings = serde_json::json!({
+            "key_resource_name": TEST_KEY
+        });
+        // No token in settings and no env var
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_gcp_env();
+        let result = GcpKmsProvider::from_config(&settings);
+        assert!(result.is_err());
+        clear_gcp_env();
+    }
 
     #[test]
     fn from_env_missing_key_returns_not_configured() {
