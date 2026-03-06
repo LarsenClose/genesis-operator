@@ -382,6 +382,56 @@ impl GenesisBootstrapping {
         })
     }
 
+    /// Inject the decrypted key material into multiple Kubernetes secrets
+    /// and transition to `Active`.
+    ///
+    /// This enables `AdditionalNamespaces` support: the same key material
+    /// is injected into each (name, namespace, key) target before the
+    /// transition consumes the key material.
+    ///
+    /// Consumes `self`; the key material is zeroed when `KeyMaterial` drops.
+    /// If any injection fails, the error is returned and remaining targets
+    /// are skipped. The key material is still zeroed on drop.
+    pub fn inject_secrets_multi(
+        mut self,
+        injector: &dyn SecretInjector,
+        targets: &[(String, String, String)], // (name, namespace, key)
+        metadata: Option<&crate::k8s::SecretMetadata>,
+    ) -> Result<Genesis<Active>, GenesisError> {
+        if targets.is_empty() {
+            return Err(GenesisError::InvalidInput(
+                "inject_secrets_multi requires at least one target".to_string(),
+            ));
+        }
+
+        let key_material = self.key_material.take().ok_or(GenesisError::NoEnvelope)?;
+
+        for (name, ns, key) in targets {
+            injector.inject(key_material.as_bytes(), name, ns, key, metadata)?;
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .expect("inner consumed before inject_secrets_multi");
+
+        for (i, (name, ns, _)) in targets.iter().enumerate() {
+            inner.audit.emit(AuditEvent::InjectSecret {
+                target_name: name.clone(),
+                target_namespace: ns.clone(),
+                key_material_zeroed: i == targets.len() - 1,
+            });
+        }
+
+        // key_material drops here, zeroing the bytes.
+
+        Ok(Genesis {
+            config: inner.config,
+            audit: inner.audit,
+            _state: PhantomData,
+        })
+    }
+
     /// Borrow the config from the inner state (read-only).
     ///
     /// Used by FFI callers to extract metadata (provider_type, public_key)
@@ -841,5 +891,149 @@ mod tests {
         assert_eq!(StateTag::Active as u8, 3);
         assert_eq!(StateTag::Rotating as u8, 4);
         assert_eq!(StateTag::Degraded as u8, 5);
+    }
+
+    #[test]
+    fn inject_secrets_multi_succeeds() {
+        let g = Genesis::new(test_config(), null_audit());
+        let kms = NullKmsProvider;
+        let (initialized, _) = g.init(&kms).expect("init should succeed");
+
+        let bootstrapping = initialized
+            .begin_bootstrap(&kms)
+            .expect("begin_bootstrap should succeed");
+
+        let injector = MockSecretInjector::new();
+        let targets = vec![
+            (
+                "genesis-key".to_string(),
+                "genesis-system".to_string(),
+                "age.key".to_string(),
+            ),
+            (
+                "genesis-key".to_string(),
+                "app-namespace".to_string(),
+                "age.key".to_string(),
+            ),
+            (
+                "genesis-key".to_string(),
+                "monitoring".to_string(),
+                "age.key".to_string(),
+            ),
+        ];
+
+        let active = bootstrapping
+            .inject_secrets_multi(&injector, &targets, None)
+            .expect("inject_secrets_multi should succeed");
+
+        // Verify all targets were injected.
+        assert!(injector.was_injected("genesis-key"));
+        let snap = injector.snapshot();
+        assert!(snap.contains_key("genesis-system/genesis-key/age.key"));
+        assert!(snap.contains_key("app-namespace/genesis-key/age.key"));
+        assert!(snap.contains_key("monitoring/genesis-key/age.key"));
+
+        let status = active.status();
+        assert_eq!(status.state, StateTag::Active);
+        assert!(status.has_envelope);
+    }
+
+    #[test]
+    fn inject_secrets_multi_empty_targets_returns_error() {
+        let g = Genesis::new(test_config(), null_audit());
+        let kms = NullKmsProvider;
+        let (initialized, _) = g.init(&kms).expect("init should succeed");
+
+        let bootstrapping = initialized
+            .begin_bootstrap(&kms)
+            .expect("begin_bootstrap should succeed");
+
+        let injector = MockSecretInjector::new();
+        let targets: Vec<(String, String, String)> = vec![];
+
+        let result = bootstrapping.inject_secrets_multi(&injector, &targets, None);
+        match result {
+            Err(ref e) => assert_eq!(e.error_code(), 103), // InvalidInput
+            Ok(_) => panic!("expected InvalidInput error for empty targets"),
+        }
+    }
+
+    #[test]
+    fn inject_secrets_multi_all_targets_receive_same_key_material() {
+        let g = Genesis::new(test_config(), null_audit());
+        let kms = NullKmsProvider;
+        let (initialized, _) = g.init(&kms).expect("init should succeed");
+
+        let bootstrapping = initialized
+            .begin_bootstrap(&kms)
+            .expect("begin_bootstrap should succeed");
+
+        let injector = MockSecretInjector::new();
+        let targets = vec![
+            (
+                "secret-a".to_string(),
+                "ns-1".to_string(),
+                "data".to_string(),
+            ),
+            (
+                "secret-b".to_string(),
+                "ns-2".to_string(),
+                "data".to_string(),
+            ),
+        ];
+
+        let _active = bootstrapping
+            .inject_secrets_multi(&injector, &targets, None)
+            .expect("inject_secrets_multi should succeed");
+
+        let snap = injector.snapshot();
+        let val_a = snap
+            .get("ns-1/secret-a/data")
+            .expect("target a should exist");
+        let val_b = snap
+            .get("ns-2/secret-b/data")
+            .expect("target b should exist");
+        // Both targets should receive identical key material.
+        assert_eq!(val_a, val_b);
+        assert!(!val_a.is_empty());
+    }
+
+    #[test]
+    fn inject_secrets_multi_with_metadata() {
+        let g = Genesis::new(test_config(), null_audit());
+        let kms = NullKmsProvider;
+        let (initialized, _) = g.init(&kms).expect("init should succeed");
+
+        let bootstrapping = initialized
+            .begin_bootstrap(&kms)
+            .expect("begin_bootstrap should succeed");
+
+        let injector = MockSecretInjector::new();
+        let meta = crate::k8s::SecretMetadata {
+            provider_type: Some("null-dev".to_string()),
+            public_key: Some("age1testkey1234".to_string()),
+        };
+        let targets = vec![
+            (
+                "genesis-key".to_string(),
+                "ns-1".to_string(),
+                "age.key".to_string(),
+            ),
+            (
+                "genesis-key".to_string(),
+                "ns-2".to_string(),
+                "age.key".to_string(),
+            ),
+        ];
+
+        let _active = bootstrapping
+            .inject_secrets_multi(&injector, &targets, Some(&meta))
+            .expect("inject_secrets_multi should succeed");
+
+        let meta_snap = injector.metadata_snapshot();
+        let meta_1 = meta_snap.get("ns-1/genesis-key").expect("meta for ns-1");
+        let meta_2 = meta_snap.get("ns-2/genesis-key").expect("meta for ns-2");
+        assert_eq!(meta_1.provider_type.as_deref(), Some("null-dev"));
+        assert_eq!(meta_2.provider_type.as_deref(), Some("null-dev"));
     }
 }

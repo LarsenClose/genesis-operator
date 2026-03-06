@@ -32,6 +32,9 @@ pub enum GenesisError {
     #[error("invalid state transition from {from} to {to}")]
     InvalidTransition { from: String, to: String },
 
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     // Crypto / Age (200s)
     #[error("age key generation failed: {0}")]
     AgeKeyGenFailed(String),
@@ -113,6 +116,7 @@ impl GenesisError {
             GenesisError::NoEnvelope => 100,
             GenesisError::NoPublicKey => 101,
             GenesisError::InvalidTransition { .. } => 102,
+            GenesisError::InvalidInput(_) => 103,
 
             GenesisError::AgeKeyGenFailed(_) => 200,
             GenesisError::AgeEncryptFailed(_) => 201,

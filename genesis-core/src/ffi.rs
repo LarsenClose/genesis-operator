@@ -29,6 +29,14 @@ use crate::state::{
     Active, Degraded, Genesis, GenesisConfig, Initialized, Rotating, StateTag, Uninitialized,
 };
 
+/// Deserialization target for JSON inject targets in [`genesis_inject_secrets`].
+#[derive(serde::Deserialize)]
+struct InjectTarget {
+    name: String,
+    namespace: String,
+    key: String,
+}
+
 // ── Callback types ───────────────────────────────────────────────────
 
 /// C-compatible audit callback signature.
@@ -643,6 +651,127 @@ pub unsafe extern "C" fn genesis_inject_secret(
                 success_result(inner_to_handle(new_inner))
             }
             // inject_secret_with_metadata() consumes bootstrapping -- no state to return.
+            Err(e) => error_result(e.error_code(), &e.to_string()),
+        }
+    })
+    .unwrap_or_else(|_| panic_result())
+}
+
+/// Inject the decrypted key material into multiple Kubernetes secrets
+/// and transition from `Bootstrapping` to `Active`.
+///
+/// `targets_json` must be a NUL-terminated JSON array of objects:
+/// `[{"name": "...", "namespace": "...", "key": "..."}]`
+///
+/// # Safety
+///
+/// `handle` must be a valid `GenesisHandle` in the `Bootstrapping` state.
+/// `targets_json` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn genesis_inject_secrets(
+    handle: GenesisHandle,
+    targets_json: *const c_char,
+) -> GenesisResult {
+    panic::catch_unwind(|| {
+        let inner = match take_inner(handle) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+
+        let bootstrapping = match inner {
+            GenesisInner::Bootstrapping(b) => b,
+            other => {
+                let handle = inner_to_handle(other);
+                return error_with_handle(
+                    102,
+                    "invalid state: genesis_inject_secrets requires Bootstrapping state",
+                    handle,
+                );
+            }
+        };
+
+        let targets_str = match parse_c_str(targets_json) {
+            Ok(s) => s,
+            Err(r) => {
+                let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                return graft_handle(r, handle);
+            }
+        };
+
+        // Parse JSON targets array.
+        let targets: Vec<InjectTarget> = match serde_json::from_str(targets_str) {
+            Ok(t) => t,
+            Err(e) => {
+                let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                return error_with_handle(400, &format!("invalid targets JSON: {e}"), handle);
+            }
+        };
+
+        // Convert to the tuple format expected by inject_secrets_multi.
+        let target_tuples: Vec<(String, String, String)> = targets
+            .iter()
+            .map(|t| (t.name.clone(), t.namespace.clone(), t.key.clone()))
+            .collect();
+
+        // Create injector (same logic as genesis_inject_secret).
+        let injector: Box<dyn SecretInjector> = match std::env::var("KUBERNETES_SERVICE_HOST") {
+            Ok(_) => match UreqSecretInjector::in_cluster() {
+                Ok(inj) => Box::new(inj),
+                Err(e) => {
+                    #[cfg(feature = "mock")]
+                    {
+                        bootstrapping.emit_audit(AuditEvent::Warning {
+                            message: format!(
+                                "using mock secret injector (in-cluster auth failed: {e})"
+                            ),
+                        });
+                        Box::new(MockSecretInjector::new())
+                    }
+                    #[cfg(not(feature = "mock"))]
+                    {
+                        let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                        return error_with_handle(
+                            400,
+                            &format!("in-cluster authentication failed: {e}"),
+                            handle,
+                        );
+                    }
+                }
+            },
+            Err(_) => {
+                #[cfg(feature = "mock")]
+                {
+                    bootstrapping.emit_audit(AuditEvent::Warning {
+                        message:
+                            "WARNING: using mock secret injector (KUBERNETES_SERVICE_HOST not set)"
+                                .to_string(),
+                    });
+                    Box::new(MockSecretInjector::new())
+                }
+                #[cfg(not(feature = "mock"))]
+                {
+                    let handle = inner_to_handle(GenesisInner::Bootstrapping(bootstrapping));
+                    return error_with_handle(
+                        400,
+                        "in-cluster authentication required (KUBERNETES_SERVICE_HOST not set)",
+                        handle,
+                    );
+                }
+            }
+        };
+
+        // Build metadata from the bootstrapping state's config.
+        let metadata = crate::k8s::SecretMetadata {
+            provider_type: Some(bootstrapping.config_ref().provider_type.clone()),
+            public_key: bootstrapping.config_ref().public_key.clone(),
+        };
+
+        match bootstrapping.inject_secrets_multi(&*injector, &target_tuples, Some(&metadata)) {
+            Ok(active) => {
+                let new_inner = GenesisInner::Active(active);
+                success_result(inner_to_handle(new_inner))
+            }
+            // inject_secrets_multi() consumes bootstrapping -- no state to return.
             Err(e) => error_result(e.error_code(), &e.to_string()),
         }
     })
@@ -1881,6 +2010,128 @@ mod tests {
 
         unsafe {
             genesis_free_string(r.data_json);
+            genesis_free(r.handle);
+        }
+    }
+
+    #[test]
+    fn ffi_inject_secrets_multi_lifecycle() {
+        // new -> init -> begin_bootstrap -> inject_secrets (multi) -> status
+        let config = mock_config_json();
+        let kms_config = mock_kms_config_json();
+
+        // 1. genesis_new
+        let r = unsafe { genesis_new(config.as_ptr(), None) };
+        assert!(r.success);
+        let handle = r.handle;
+
+        // 2. genesis_init
+        let r = unsafe { genesis_init(handle, kms_config.as_ptr()) };
+        assert!(r.success, "genesis_init should succeed");
+        assert_eq!(r.handle.state, StateTag::Initialized);
+        unsafe { genesis_free_string(r.data_json) };
+        let handle = r.handle;
+
+        // 3. genesis_begin_bootstrap
+        let r = unsafe { genesis_begin_bootstrap(handle, kms_config.as_ptr()) };
+        assert!(r.success, "genesis_begin_bootstrap should succeed");
+        assert_eq!(r.handle.state, StateTag::Bootstrapping);
+        let handle = r.handle;
+
+        // 4. genesis_inject_secrets (multi-target)
+        let targets_json = CString::new(
+            serde_json::json!([
+                {"name": "genesis-key", "namespace": "genesis-system", "key": "age.key"},
+                {"name": "genesis-key", "namespace": "app-ns", "key": "age.key"},
+                {"name": "genesis-key", "namespace": "monitoring", "key": "age.key"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let r = unsafe { genesis_inject_secrets(handle, targets_json.as_ptr()) };
+        assert!(r.success, "genesis_inject_secrets should succeed");
+        assert_eq!(r.handle.state, StateTag::Active);
+        let handle = r.handle;
+
+        // 5. genesis_status (verify Active state)
+        let mut status_out: *mut c_char = ptr::null_mut();
+        let r = unsafe { genesis_status(handle, &mut status_out) };
+        assert!(r.success, "genesis_status should succeed");
+        assert_eq!(r.handle.state, StateTag::Active);
+        assert!(!r.data_json.is_null());
+
+        let status_str = unsafe { CStr::from_ptr(status_out).to_str().unwrap() };
+        assert!(status_str.contains("active"));
+
+        unsafe {
+            genesis_free_string(status_out);
+            genesis_free_string(r.data_json);
+            genesis_free(r.handle);
+        }
+    }
+
+    #[test]
+    fn ffi_inject_secrets_wrong_state() {
+        let config = mock_config_json();
+
+        // Create in Uninitialized state.
+        let r = unsafe { genesis_new(config.as_ptr(), None) };
+        assert!(r.success);
+
+        // Try inject_secrets from wrong state (Uninitialized).
+        let targets_json = CString::new(
+            serde_json::json!([
+                {"name": "s", "namespace": "n", "key": "k"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let r = unsafe { genesis_inject_secrets(r.handle, targets_json.as_ptr()) };
+        assert!(!r.success);
+        assert_eq!(r.error_code, 102);
+        assert!(
+            !r.handle.ptr.is_null(),
+            "wrong-state error must return a non-null handle"
+        );
+
+        unsafe {
+            genesis_free_string(r.error_message);
+            genesis_free(r.handle);
+        }
+    }
+
+    #[test]
+    fn ffi_inject_secrets_bad_json() {
+        let config = mock_config_json();
+        let kms_config = mock_kms_config_json();
+
+        // new -> init -> begin_bootstrap
+        let r = unsafe { genesis_new(config.as_ptr(), None) };
+        assert!(r.success);
+        let r = unsafe { genesis_init(r.handle, kms_config.as_ptr()) };
+        assert!(r.success);
+        unsafe { genesis_free_string(r.data_json) };
+        let r = unsafe { genesis_begin_bootstrap(r.handle, kms_config.as_ptr()) };
+        assert!(r.success);
+        assert_eq!(r.handle.state, StateTag::Bootstrapping);
+
+        // Bad JSON targets.
+        let bad_json = CString::new("not valid json").unwrap();
+        let r = unsafe { genesis_inject_secrets(r.handle, bad_json.as_ptr()) };
+        assert!(!r.success);
+        assert_eq!(r.error_code, 400);
+        assert!(
+            !r.handle.ptr.is_null(),
+            "bad JSON error must return a non-null handle"
+        );
+        assert_eq!(
+            r.handle.state,
+            StateTag::Bootstrapping,
+            "handle should still be in Bootstrapping state"
+        );
+
+        unsafe {
+            genesis_free_string(r.error_message);
             genesis_free(r.handle);
         }
     }

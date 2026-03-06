@@ -153,6 +153,20 @@ struct GenesisResult genesis_inject_secret(struct GenesisHandle handle,
                                            const char *secret_key);
 
 /**
+ * Inject the decrypted key material into multiple Kubernetes secrets
+ * and transition from `Bootstrapping` to `Active`.
+ *
+ * `targets_json` must be a NUL-terminated JSON array of objects:
+ * `[{"name": "...", "namespace": "...", "key": "..."}]`
+ *
+ * # Safety
+ *
+ * `handle` must be a valid `GenesisHandle` in the `Bootstrapping` state.
+ * `targets_json` must be a valid NUL-terminated C string.
+ */
+struct GenesisResult genesis_inject_secrets(struct GenesisHandle handle, const char *targets_json);
+
+/**
  * Return a JSON-serialised status snapshot.
  *
  * On success, writes JSON to `*status_json_out` (caller must free with
