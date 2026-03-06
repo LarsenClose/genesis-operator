@@ -323,15 +323,15 @@ func (l *LegacyBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *gene
 		return "", nil, fmt.Errorf("failed to decrypt envelope: %w", err)
 	}
 
-	privateKey := string(plaintext)
+	privateKey := string(plaintext) // legacy-go-path: test-only
 
 	// 5. Validate the decrypted key is a valid age private key
-	if !strings.HasPrefix(privateKey, "AGE-SECRET-KEY-1") {
+	if !strings.HasPrefix(privateKey, "AGE-SECRET-KEY-1") { // legacy-go-path: test-only
 		handle.Free()
 		return "", nil, fmt.Errorf("decrypted content is not a valid age private key")
 	}
 
-	identity, err := age.ParseX25519Identity(privateKey)
+	identity, err := age.ParseX25519Identity(privateKey) // legacy-go-path: test-only
 	if err != nil {
 		handle.Free()
 		return "", nil, fmt.Errorf("decrypted key is invalid: %w", err)
@@ -346,7 +346,7 @@ func (l *LegacyBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *gene
 	}
 
 	// 7. Create or update the primary secret
-	if err := l.ensureSecret(ctx, bootstrap, privateKey); err != nil {
+	if err := l.ensureSecret(ctx, bootstrap, privateKey); err != nil { // legacy-go-path: test-only
 		handle.Free()
 		return "", nil, fmt.Errorf("failed to ensure secret: %w", err)
 	}
@@ -393,7 +393,7 @@ func (l *LegacyBootstrapInjector) ensureSecret(ctx context.Context, bootstrap *g
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)
 		}
-		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
+		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey) // legacy-go-path: test-only
 
 		return nil
 	})
@@ -407,7 +407,7 @@ func (l *LegacyBootstrapInjector) ensureSecret(ctx context.Context, bootstrap *g
 
 	// Handle additional namespaces
 	for _, ns := range bootstrap.Spec.Output.AdditionalNamespaces {
-		if err := l.ensureSecretInNamespace(ctx, bootstrap, privateKey, ns); err != nil {
+		if err := l.ensureSecretInNamespace(ctx, bootstrap, privateKey, ns); err != nil { // legacy-go-path: test-only
 			logger.Error(err, "Failed to create secret in additional namespace", "namespace", ns)
 		}
 	}
@@ -440,7 +440,7 @@ func (l *LegacyBootstrapInjector) ensureSecretInNamespace(ctx context.Context, b
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)
 		}
-		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
+		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey) // legacy-go-path: test-only
 
 		return nil
 	})

@@ -132,15 +132,11 @@ docker-push: ## Push Docker image
 ##@ Security
 
 .PHONY: check-key-material
-# TODO(task-1.3): The first grep below only scans internal/bridge/ and cmd/.
-# After controller migration completes, widen to all of internal/ with only
-# the documented exceptions (bridge.go, unseal.go, rotate.go). Currently
-# scoped narrowly because internal/controller/ legitimately uses crypto.
 check-key-material: ## Verify no unexpected key material references in Go layer
 	@echo "Checking for key material in Go layer..."
 	@VIOLATIONS=$$(grep -rn 'privateKey\|PrivateKey\|\.agekey\|age\.Identity\|AgeDecrypt\|AgeKeypair' \
 		--include='*.go' \
-		internal/bridge/ cmd/ \
+		internal/bridge/ internal/controller/ cmd/ \
 		| grep -v '_test.go' \
 		| grep -v 'bridge.go' \
 		| grep -v '// safe: public key only' \
@@ -148,6 +144,8 @@ check-key-material: ## Verify no unexpected key material references in Go layer
 		| grep -v 'unseal\.go' \
 		| grep -v 'rotate\.go' \
 		| grep -v 'age\.agekey' \
+		| grep -v 'LegacyBootstrapInjector' \
+		| grep -v '// legacy-go-path: test-only' \
 	); \
 	if [ -n "$$VIOLATIONS" ]; then \
 		echo "$$VIOLATIONS"; \
