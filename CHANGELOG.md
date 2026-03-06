@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-06
+
+### Added
+- **Security invariant restoration** (Phase 4): `BootstrapInjector` strategy pattern — production path (`BridgeBootstrapInjector`) keeps all key material in Rust memory; legacy path (`LegacyBootstrapInjector`) retained for test compatibility and `AdditionalNamespaces` support
+- **KMS config JSON bridge** (Phase 3): Go credential resolution feeds Rust KMS providers via `BuildKmsConfigJSON()`, enabling cloud-native auth (IRSA, Workload Identity, Instance Principal) to flow through the FFI boundary
+- **UreqSecretInjector enrichment** (Phase 2): Labels, annotations, TLS CA verification, and FFI metadata propagation for Rust-side K8s secret injection
+- **Dependabot auto-merge workflow**: Dependency update PRs auto-merge when all CI gates pass
+
+### Fixed
+- Mock-dependent CLI tests guarded behind `genesis_mock` build tag (no longer fail in release builds)
+- Rust build target with `--features mock` for Go bridge test compatibility
+- Raw JSON manifest digest extraction in release workflow
+
+### Security
+- Controller no longer holds plaintext key material in Go memory (restored invariant: all cryptographic operations execute in Rust)
+
+## [0.4.0] - 2026-03-01
+
+### Added
+- **Post-quantum cryptography**: ML-DSA-87 / ML-KEM-1024 key generation and envelope operations in genesis-core
+- **Local provider**: Standalone mode for development and testing without cloud KMS
+- **PQ crypto Go integration**: Bridge and CLI wiring for post-quantum operations
+- Comprehensive test coverage for PQ crypto Go integration
+
+### Changed
+- Native arm64 runners + cache mounts for Docker builds
+
+### Security
+- Production hardening of genesis-core (input validation, error handling, memory safety audit)
+
+### Fixed
+- SOPS_AGE_KEY_FILE path `nosec` annotation (G703)
+- Release workflow test failures and arm64 push permissions
+- OCI labels on Dockerfile for GHCR auto-linking
+- PAT authentication for GHCR push in release workflow
+
 ## [0.3.0] - 2026-02-22
 
 ### Added
@@ -97,7 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AWS KMS integration prototype
 - CLI scaffolding with Cobra
 
-[Unreleased]: https://github.com/larsenclose/genesis-operator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/larsenclose/genesis-operator/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/larsenclose/genesis-operator/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/larsenclose/genesis-operator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/larsenclose/genesis-operator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/larsenclose/genesis-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/larsenclose/genesis-operator/releases/tag/v0.1.0

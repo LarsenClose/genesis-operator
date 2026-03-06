@@ -607,10 +607,6 @@ func (r *GenesisBootstrapReconciler) handleDeletion(ctx context.Context, bootstr
 	return ctrl.Result{}, nil
 }
 
-func (r *GenesisBootstrapReconciler) createProvider(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap) (kms.Provider, error) {
-	return r.getProviderFactory().CreateProvider(ctx, bootstrap)
-}
-
 func (r *GenesisBootstrapReconciler) verifyAttestation(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, error) {
 	return r.getAttestationVerifier().VerifyAttestation(ctx, bootstrap)
 }
