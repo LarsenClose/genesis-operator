@@ -236,6 +236,31 @@ func (h *Handle) InjectSecret(name, namespace, key string) error {
 	return err
 }
 
+// InjectTarget represents a single secret injection target.
+type InjectTarget struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Key       string `json:"key"`
+}
+
+// InjectSecrets writes the decrypted key material into multiple Kubernetes
+// secrets and transitions from Bootstrapping to Active. This supports the
+// AdditionalNamespaces feature without key material leaving Rust memory.
+func (h *Handle) InjectSecrets(targets []InjectTarget) error {
+	targetsJSON, err := json.Marshal(targets)
+	if err != nil {
+		return fmt.Errorf("genesis: failed to marshal targets: %w", err)
+	}
+
+	cTargets := C.CString(string(targetsJSON))
+	defer C.free(unsafe.Pointer(cTargets))
+
+	result := C.genesis_inject_secrets(h.inner, cTargets)
+	newH, _, err := resultToError(result)
+	h.recoverHandle(newH)
+	return err
+}
+
 // Status returns a status snapshot from an Active genesis instance.
 func (h *Handle) Status() (*GenesisStatus, error) {
 	result := C.genesis_status(h.inner, nil)

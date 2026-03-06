@@ -256,14 +256,26 @@ func (b *BridgeBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *gene
 		return "", nil, fmt.Errorf("failed to begin bootstrap: %w", err)
 	}
 
-	// 5. Inject secret via Rust ureq HTTP
-	if err := handle.InjectSecret(
-		bootstrap.Spec.Output.SecretName,
-		bootstrap.Spec.Output.SecretNamespace,
-		bootstrap.Spec.Output.SecretKey,
-	); err != nil {
+	// 5. Build injection targets (primary + additional namespaces)
+	targets := []bridge.InjectTarget{
+		{
+			Name:      bootstrap.Spec.Output.SecretName,
+			Namespace: bootstrap.Spec.Output.SecretNamespace,
+			Key:       bootstrap.Spec.Output.SecretKey,
+		},
+	}
+	for _, ns := range bootstrap.Spec.Output.AdditionalNamespaces {
+		targets = append(targets, bridge.InjectTarget{
+			Name:      bootstrap.Spec.Output.SecretName,
+			Namespace: ns,
+			Key:       bootstrap.Spec.Output.SecretKey,
+		})
+	}
+
+	// 6. Inject secrets via Rust ureq HTTP (all targets in one FFI call)
+	if err := handle.InjectSecrets(targets); err != nil {
 		handle.Free()
-		return "", nil, fmt.Errorf("failed to inject secret: %w", err)
+		return "", nil, fmt.Errorf("failed to inject secrets: %w", err)
 	}
 
 	return bootstrap.Spec.Envelope.PublicKey, handle, nil
@@ -271,8 +283,8 @@ func (b *BridgeBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *gene
 
 // LegacyBootstrapInjector implements BootstrapInjector using the Go KMS
 // decrypt path and controller-runtime client for K8s secret creation.
-// This exists for test compatibility (fake K8s client) and for the
-// AdditionalNamespaces feature which the bridge does not yet support.
+// This exists for test compatibility (fake K8s client). Production code
+// uses BridgeBootstrapInjector which handles AdditionalNamespaces natively.
 type LegacyBootstrapInjector struct {
 	Client          client.Client
 	ProviderFactory ProviderFactory
@@ -448,7 +460,7 @@ type GenesisBootstrapReconciler struct {
 	AttestationVerifier AttestationVerifier
 
 	// BootstrapInjector handles decrypt + inject. If nil, uses BridgeBootstrapInjector
-	// unless AdditionalNamespaces is specified (falls back to LegacyBootstrapInjector).
+	// (supports both single-target and AdditionalNamespaces via InjectSecrets FFI).
 	BootstrapInjector BootstrapInjector
 
 	// genesisHandle holds the bridge handle for the genesis-core Rust state machine.
@@ -473,18 +485,12 @@ func (r *GenesisBootstrapReconciler) getAttestationVerifier() AttestationVerifie
 	return &DefaultAttestationVerifier{}
 }
 
-// getBootstrapInjector returns the configured bootstrap injector or selects one.
-// If explicitly set, uses that. If AdditionalNamespaces are present, uses the
-// legacy Go path. Otherwise, uses the Rust bridge path (production default).
+// getBootstrapInjector returns the configured bootstrap injector or the default.
+// If explicitly set (e.g. for tests), uses that. Otherwise, uses the Rust bridge
+// path which handles both single and multi-target injection (AdditionalNamespaces).
 func (r *GenesisBootstrapReconciler) getBootstrapInjector(bootstrap *genesisv1alpha1.GenesisBootstrap) BootstrapInjector {
 	if r.BootstrapInjector != nil {
 		return r.BootstrapInjector
-	}
-	if len(bootstrap.Spec.Output.AdditionalNamespaces) > 0 {
-		return &LegacyBootstrapInjector{
-			Client:          r.Client,
-			ProviderFactory: r.getProviderFactory(),
-		}
 	}
 	return &BridgeBootstrapInjector{}
 }
@@ -538,7 +544,7 @@ func (r *GenesisBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Decrypt and inject secret via the BootstrapInjector strategy.
 	// BridgeBootstrapInjector (default): key material never enters Go memory.
-	// LegacyBootstrapInjector: Go KMS decrypt + controller-runtime client (tests, AdditionalNamespaces).
+	// LegacyBootstrapInjector: Go KMS decrypt + controller-runtime client (tests only).
 	injector := r.getBootstrapInjector(bootstrap)
 	publicKey, handle, err := injector.Bootstrap(ctx, bootstrap)
 	if err != nil {
