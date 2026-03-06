@@ -204,6 +204,238 @@ func (v *DefaultAttestationVerifier) VerifyAttestation(ctx context.Context, boot
 	return "", fmt.Errorf("no valid attestation configuration found")
 }
 
+// BootstrapInjector abstracts the decrypt + secret injection flow.
+// Production uses the Rust bridge (BridgeBootstrapInjector); tests use the
+// legacy Go KMS path (LegacyBootstrapInjector).
+type BootstrapInjector interface {
+	// Bootstrap decrypts the envelope and injects the secret into Kubernetes.
+	// Returns the public key for status reporting and a bridge handle for state tracking.
+	Bootstrap(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap) (publicKey string, handle *bridge.Handle, err error)
+}
+
+// BridgeBootstrapInjector implements BootstrapInjector using the Rust bridge.
+// Key material never enters Go memory — decryption and secret injection happen
+// entirely in Rust via the genesis-core FFI.
+type BridgeBootstrapInjector struct{}
+
+// Bootstrap implements BootstrapInjector via the Rust bridge path:
+// BuildKmsConfigJSON -> New -> Load -> BeginBootstrap -> InjectSecret.
+func (b *BridgeBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, *bridge.Handle, error) {
+	// 1. Build KMS config JSON from CRD spec
+	kmsConfigJSON, err := bridge.BuildKmsConfigJSON(&bootstrap.Spec.Envelope)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to build KMS config: %w", err)
+	}
+
+	// 2. Create bridge handle with real KMS provider
+	handle, err := bridge.New(kmsConfigJSON)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create genesis handle: %w", err)
+	}
+
+	// 3. Decode ciphertext and load envelope
+	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
+	if err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to decode ciphertext: %w", err)
+	}
+
+	if bootstrap.Spec.Envelope.PublicKey == "" {
+		handle.Free()
+		return "", nil, fmt.Errorf("public key is required for bridge bootstrap")
+	}
+
+	if err := handle.Load(bootstrap.Spec.Envelope.PublicKey, ciphertext); err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to load envelope: %w", err)
+	}
+
+	// 4. Begin bootstrap — decrypt in Rust memory
+	if err := handle.BeginBootstrap(kmsConfigJSON); err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to begin bootstrap: %w", err)
+	}
+
+	// 5. Inject secret via Rust ureq HTTP
+	if err := handle.InjectSecret(
+		bootstrap.Spec.Output.SecretName,
+		bootstrap.Spec.Output.SecretNamespace,
+		bootstrap.Spec.Output.SecretKey,
+	); err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to inject secret: %w", err)
+	}
+
+	return bootstrap.Spec.Envelope.PublicKey, handle, nil
+}
+
+// LegacyBootstrapInjector implements BootstrapInjector using the Go KMS
+// decrypt path and controller-runtime client for K8s secret creation.
+// This exists for test compatibility (fake K8s client) and for the
+// AdditionalNamespaces feature which the bridge does not yet support.
+type LegacyBootstrapInjector struct {
+	Client          client.Client
+	ProviderFactory ProviderFactory
+}
+
+// Bootstrap implements BootstrapInjector via the legacy Go path:
+// Go KMS decrypt -> age key validation -> controller-runtime secret creation.
+func (l *LegacyBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, *bridge.Handle, error) {
+	// 1. Create Go KMS provider
+	provider, err := l.ProviderFactory.CreateProvider(ctx, bootstrap)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create KMS provider: %w", err)
+	}
+
+	// 2. Decode ciphertext
+	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode ciphertext: %w", err)
+	}
+
+	// 3. Create bridge handle (mock) for state tracking
+	handle, err := bridge.New(`{"provider_type":"mock","provider_config":{}}`)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create genesis handle: %w", err)
+	}
+
+	if err := handle.Load(bootstrap.Spec.Envelope.PublicKey, ciphertext); err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to load envelope into bridge: %w", err)
+	}
+
+	// 4. Go KMS: decrypt the envelope to extract the private key
+	plaintext, err := provider.Decrypt(ctx, ciphertext)
+	if err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to decrypt envelope: %w", err)
+	}
+
+	privateKey := string(plaintext)
+
+	// 5. Validate the decrypted key is a valid age private key
+	if !strings.HasPrefix(privateKey, "AGE-SECRET-KEY-1") {
+		handle.Free()
+		return "", nil, fmt.Errorf("decrypted content is not a valid age private key")
+	}
+
+	identity, err := age.ParseX25519Identity(privateKey)
+	if err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("decrypted key is invalid: %w", err)
+	}
+
+	// 6. Verify public key matches if specified
+	derivedPubKey := identity.Recipient().String()
+	if bootstrap.Spec.Envelope.PublicKey != "" && derivedPubKey != bootstrap.Spec.Envelope.PublicKey {
+		handle.Free()
+		return "", nil, fmt.Errorf("public key mismatch: expected %s, got %s",
+			bootstrap.Spec.Envelope.PublicKey, derivedPubKey)
+	}
+
+	// 7. Create or update the primary secret
+	if err := l.ensureSecret(ctx, bootstrap, privateKey); err != nil {
+		handle.Free()
+		return "", nil, fmt.Errorf("failed to ensure secret: %w", err)
+	}
+
+	return derivedPubKey, handle, nil
+}
+
+func (l *LegacyBootstrapInjector) ensureSecret(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, privateKey string) error {
+	logger := log.FromContext(ctx)
+
+	// Ensure the target namespace exists
+	ns := &corev1.Namespace{}
+	if err := l.Client.Get(ctx, types.NamespacedName{Name: bootstrap.Spec.Output.SecretNamespace}, ns); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("target namespace %s does not exist", bootstrap.Spec.Output.SecretNamespace)
+		}
+		return err
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootstrap.Spec.Output.SecretName,
+			Namespace: bootstrap.Spec.Output.SecretNamespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, l.Client, secret, func() error {
+		// Set labels
+		if secret.Labels == nil {
+			secret.Labels = make(map[string]string)
+		}
+		secret.Labels["app.kubernetes.io/managed-by"] = "genesis-operator"
+		secret.Labels["genesis.io/bootstrap"] = bootstrap.Name
+
+		// Set annotations
+		if secret.Annotations == nil {
+			secret.Annotations = make(map[string]string)
+		}
+		secret.Annotations["genesis.io/source-namespace"] = bootstrap.Namespace
+		secret.Annotations["genesis.io/source-name"] = bootstrap.Name
+
+		// Set data
+		secret.Type = corev1.SecretTypeOpaque
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to create/update secret: %w", err)
+	}
+
+	logger.Info("Secret operation completed", "operation", op,
+		"name", secret.Name, "namespace", secret.Namespace)
+
+	// Handle additional namespaces
+	for _, ns := range bootstrap.Spec.Output.AdditionalNamespaces {
+		if err := l.ensureSecretInNamespace(ctx, bootstrap, privateKey, ns); err != nil {
+			logger.Error(err, "Failed to create secret in additional namespace", "namespace", ns)
+		}
+	}
+
+	return nil
+}
+
+func (l *LegacyBootstrapInjector) ensureSecretInNamespace(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, privateKey string, namespace string) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootstrap.Spec.Output.SecretName,
+			Namespace: namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, l.Client, secret, func() error {
+		if secret.Labels == nil {
+			secret.Labels = make(map[string]string)
+		}
+		secret.Labels["app.kubernetes.io/managed-by"] = "genesis-operator"
+		secret.Labels["genesis.io/bootstrap"] = bootstrap.Name
+
+		if secret.Annotations == nil {
+			secret.Annotations = make(map[string]string)
+		}
+		secret.Annotations["genesis.io/source-namespace"] = bootstrap.Namespace
+		secret.Annotations["genesis.io/source-name"] = bootstrap.Name
+
+		secret.Type = corev1.SecretTypeOpaque
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
+
+		return nil
+	})
+
+	return err
+}
+
 // GenesisBootstrapReconciler reconciles a GenesisBootstrap object
 type GenesisBootstrapReconciler struct {
 	client.Client
@@ -214,6 +446,10 @@ type GenesisBootstrapReconciler struct {
 
 	// AttestationVerifier verifies identity attestation. If nil, uses DefaultAttestationVerifier.
 	AttestationVerifier AttestationVerifier
+
+	// BootstrapInjector handles decrypt + inject. If nil, uses BridgeBootstrapInjector
+	// unless AdditionalNamespaces is specified (falls back to LegacyBootstrapInjector).
+	BootstrapInjector BootstrapInjector
 
 	// genesisHandle holds the bridge handle for the genesis-core Rust state machine.
 	// It tracks the crypto lifecycle (Uninitialized -> Initialized -> Active).
@@ -235,6 +471,22 @@ func (r *GenesisBootstrapReconciler) getAttestationVerifier() AttestationVerifie
 		return r.AttestationVerifier
 	}
 	return &DefaultAttestationVerifier{}
+}
+
+// getBootstrapInjector returns the configured bootstrap injector or selects one.
+// If explicitly set, uses that. If AdditionalNamespaces are present, uses the
+// legacy Go path. Otherwise, uses the Rust bridge path (production default).
+func (r *GenesisBootstrapReconciler) getBootstrapInjector(bootstrap *genesisv1alpha1.GenesisBootstrap) BootstrapInjector {
+	if r.BootstrapInjector != nil {
+		return r.BootstrapInjector
+	}
+	if len(bootstrap.Spec.Output.AdditionalNamespaces) > 0 {
+		return &LegacyBootstrapInjector{
+			Client:          r.Client,
+			ProviderFactory: r.getProviderFactory(),
+		}
+	}
+	return &BridgeBootstrapInjector{}
 }
 
 // +kubebuilder:rbac:groups=genesis.io,resources=genesisbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -272,18 +524,6 @@ func (r *GenesisBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Create KMS provider
-	provider, err := r.createProvider(ctx, bootstrap)
-	if err != nil {
-		logger.Error(err, "Failed to create KMS provider")
-		r.setCondition(bootstrap, genesisv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
-			genesisv1alpha1.ReasonProviderNotSupported, err.Error())
-		if statusErr := r.Status().Update(ctx, bootstrap); statusErr != nil {
-			logger.Error(statusErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	}
-
 	// Verify attestation if required
 	identity, err := r.verifyAttestation(ctx, bootstrap)
 	if err != nil {
@@ -296,10 +536,13 @@ func (r *GenesisBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	// Decrypt the envelope
-	privateKey, err := r.decryptEnvelope(ctx, provider, bootstrap)
+	// Decrypt and inject secret via the BootstrapInjector strategy.
+	// BridgeBootstrapInjector (default): key material never enters Go memory.
+	// LegacyBootstrapInjector: Go KMS decrypt + controller-runtime client (tests, AdditionalNamespaces).
+	injector := r.getBootstrapInjector(bootstrap)
+	publicKey, handle, err := injector.Bootstrap(ctx, bootstrap)
 	if err != nil {
-		logger.Error(err, "Failed to decrypt envelope")
+		logger.Error(err, "Failed to bootstrap")
 		r.setCondition(bootstrap, genesisv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			genesisv1alpha1.ReasonDecryptionFailed, err.Error())
 		if statusErr := r.Status().Update(ctx, bootstrap); statusErr != nil {
@@ -308,19 +551,14 @@ func (r *GenesisBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	// Create or update the secret
-	if err := r.ensureSecret(ctx, bootstrap, privateKey); err != nil {
-		logger.Error(err, "Failed to ensure secret")
-		r.setCondition(bootstrap, genesisv1alpha1.ConditionTypeSecretCreated, metav1.ConditionFalse,
-			genesisv1alpha1.ReasonSecretCreationFailed, err.Error())
-		if statusErr := r.Status().Update(ctx, bootstrap); statusErr != nil {
-			logger.Error(statusErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	// Track handle
+	if r.genesisHandle != nil {
+		r.genesisHandle.Free()
 	}
+	r.genesisHandle = handle
 
 	// Update status
-	r.updateSuccessStatus(bootstrap, provider, privateKey, identity)
+	r.updateSuccessStatus(bootstrap, publicKey, identity)
 	if err := r.Status().Update(ctx, bootstrap); err != nil {
 		logger.Error(err, "Failed to update status")
 		return ctrl.Result{}, err
@@ -377,176 +615,8 @@ func (r *GenesisBootstrapReconciler) verifyAttestation(ctx context.Context, boot
 	return r.getAttestationVerifier().VerifyAttestation(ctx, bootstrap)
 }
 
-// decryptEnvelope decrypts the KMS-encrypted envelope and validates the key.
-//
-// The bridge (genesis-core Rust) is used for state tracking and key validation
-// via Load + Verify. The Go KMS provider performs the actual KMS decryption so
-// the private key can be written to K8s secrets by the Go client.
-//
-// NOTE: The bridge's InjectSecret now uses UreqSecretInjector when running
-// in-cluster (detected via KUBERNETES_SERVICE_HOST). A future iteration can
-// migrate to bridge.BeginBootstrap + bridge.InjectSecret to keep the private
-// key entirely in Rust memory. For now, the Go KMS provider path is retained
-// for compatibility with the existing test suite and multi-namespace support.
-func (r *GenesisBootstrapReconciler) decryptEnvelope(ctx context.Context, provider kms.Provider, bootstrap *genesisv1alpha1.GenesisBootstrap) (string, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode ciphertext: %w", err)
-	}
-
-	// --- Bridge: load envelope into Rust state machine for validation ---
-	// bridge.New takes a GenesisConfig JSON (provider_type + provider_config).
-	// The mock provider is used because the bridge is only used for state tracking
-	// and key validation here; actual KMS decryption happens via the Go provider.
-	// Phase 4 will migrate to bridge.BeginBootstrap + bridge.InjectSecret using
-	// bridge.BuildKmsConfigJSON for the KmsConfig JSON payload.
-	handle, err := bridge.New(`{"provider_type":"mock","provider_config":{}}`)
-	if err != nil {
-		return "", fmt.Errorf("failed to create genesis handle: %w", err)
-	}
-	// Track the handle on the reconciler for state reporting
-	if r.genesisHandle != nil {
-		r.genesisHandle.Free()
-	}
-	r.genesisHandle = handle
-
-	if err := handle.Load(bootstrap.Spec.Envelope.PublicKey, ciphertext); err != nil {
-		return "", fmt.Errorf("failed to load envelope into bridge: %w", err)
-	}
-
-	// --- Go KMS: decrypt the envelope to extract the private key ---
-	// The Go KMS provider is used because bridge.InjectSecret currently uses
-	// MockSecretInjector and cannot write to real K8s secrets.
-	plaintext, err := provider.Decrypt(ctx, ciphertext)
-	if err != nil {
-		return "", fmt.Errorf("failed to decrypt envelope: %w", err)
-	}
-
-	privateKey := string(plaintext)
-
-	// Validate the decrypted key is a valid age private key
-	if !strings.HasPrefix(privateKey, "AGE-SECRET-KEY-1") {
-		return "", fmt.Errorf("decrypted content is not a valid age private key")
-	}
-
-	identity, err := age.ParseX25519Identity(privateKey)
-	if err != nil {
-		return "", fmt.Errorf("decrypted key is invalid: %w", err)
-	}
-
-	// Verify public key matches if specified
-	derivedPubKey := identity.Recipient().String()
-	if bootstrap.Spec.Envelope.PublicKey != "" && derivedPubKey != bootstrap.Spec.Envelope.PublicKey {
-		return "", fmt.Errorf("public key mismatch: expected %s, got %s",
-			bootstrap.Spec.Envelope.PublicKey, derivedPubKey)
-	}
-
-	return privateKey, nil
-}
-
-func (r *GenesisBootstrapReconciler) ensureSecret(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, privateKey string) error {
-	logger := log.FromContext(ctx)
-
-	// Ensure the target namespace exists
-	ns := &corev1.Namespace{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bootstrap.Spec.Output.SecretNamespace}, ns); err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("target namespace %s does not exist", bootstrap.Spec.Output.SecretNamespace)
-		}
-		return err
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bootstrap.Spec.Output.SecretName,
-			Namespace: bootstrap.Spec.Output.SecretNamespace,
-		},
-	}
-
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		// Set labels
-		if secret.Labels == nil {
-			secret.Labels = make(map[string]string)
-		}
-		secret.Labels["app.kubernetes.io/managed-by"] = "genesis-operator"
-		secret.Labels["genesis.io/bootstrap"] = bootstrap.Name
-
-		// Set annotations
-		if secret.Annotations == nil {
-			secret.Annotations = make(map[string]string)
-		}
-		secret.Annotations["genesis.io/source-namespace"] = bootstrap.Namespace
-		secret.Annotations["genesis.io/source-name"] = bootstrap.Name
-
-		// Set data
-		secret.Type = corev1.SecretTypeOpaque
-		if secret.Data == nil {
-			secret.Data = make(map[string][]byte)
-		}
-		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
-
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to create/update secret: %w", err)
-	}
-
-	logger.Info("Secret operation completed", "operation", op,
-		"name", secret.Name, "namespace", secret.Namespace)
-
-	// Handle additional namespaces
-	for _, ns := range bootstrap.Spec.Output.AdditionalNamespaces {
-		if err := r.ensureSecretInNamespace(ctx, bootstrap, privateKey, ns); err != nil {
-			logger.Error(err, "Failed to create secret in additional namespace", "namespace", ns)
-		}
-	}
-
-	return nil
-}
-
-func (r *GenesisBootstrapReconciler) ensureSecretInNamespace(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, privateKey string, namespace string) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bootstrap.Spec.Output.SecretName,
-			Namespace: namespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		if secret.Labels == nil {
-			secret.Labels = make(map[string]string)
-		}
-		secret.Labels["app.kubernetes.io/managed-by"] = "genesis-operator"
-		secret.Labels["genesis.io/bootstrap"] = bootstrap.Name
-
-		if secret.Annotations == nil {
-			secret.Annotations = make(map[string]string)
-		}
-		secret.Annotations["genesis.io/source-namespace"] = bootstrap.Namespace
-		secret.Annotations["genesis.io/source-name"] = bootstrap.Name
-
-		secret.Type = corev1.SecretTypeOpaque
-		if secret.Data == nil {
-			secret.Data = make(map[string][]byte)
-		}
-		secret.Data[bootstrap.Spec.Output.SecretKey] = []byte(privateKey)
-
-		return nil
-	})
-
-	return err
-}
-
-func (r *GenesisBootstrapReconciler) updateSuccessStatus(bootstrap *genesisv1alpha1.GenesisBootstrap, provider kms.Provider, privateKey string, identity string) {
+func (r *GenesisBootstrapReconciler) updateSuccessStatus(bootstrap *genesisv1alpha1.GenesisBootstrap, publicKey string, identity string) {
 	now := metav1.Now()
-
-	// Derive public key from private key using age library directly.
-	// This replaces the former crypto.ParseAgeKeypair call.
-	var publicKey string
-	if ident, err := age.ParseX25519Identity(privateKey); err == nil {
-		publicKey = ident.Recipient().String()
-	}
 
 	// Set bridge state on status if handle is available
 	if r.genesisHandle != nil {
@@ -574,7 +644,7 @@ func (r *GenesisBootstrapReconciler) updateSuccessStatus(bootstrap *genesisv1alp
 	// Update attestation status
 	bootstrap.Status.LastAttestation = &genesisv1alpha1.AttestationStatus{
 		Time:     now,
-		Provider: string(provider.Name()),
+		Provider: bootstrap.Spec.Envelope.Provider,
 		Identity: identity,
 	}
 

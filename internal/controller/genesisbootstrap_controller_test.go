@@ -549,7 +549,7 @@ func TestGenesisBootstrapReconciler_CreateProvider_InvalidProvider(t *testing.T)
 	if assert.NotEmpty(t, updated.Status.Conditions) {
 		assert.Equal(t, genesisv1alpha1.ConditionTypeReady, updated.Status.Conditions[0].Type)
 		assert.Equal(t, metav1.ConditionFalse, updated.Status.Conditions[0].Status)
-		assert.Equal(t, genesisv1alpha1.ReasonProviderNotSupported, updated.Status.Conditions[0].Reason)
+		assert.Equal(t, genesisv1alpha1.ReasonDecryptionFailed, updated.Status.Conditions[0].Reason)
 	}
 }
 
@@ -755,9 +755,19 @@ func TestGenesisBootstrapReconciler_DecryptEnvelope_InvalidBase64(t *testing.T) 
 		WithObjects(namespace, bootstrap).
 		WithStatusSubresource(bootstrap).
 		Build()
+
+	// Use DefaultProviderFactory wrapped in LegacyBootstrapInjector to avoid
+	// the Rust bridge attempting to create a real AWS KMS provider.
+	mockFactory := &MockProviderFactory{
+		Provider: mock.NewProvider(),
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
+		},
 	}
 
 	req := reconcile.Request{
@@ -878,7 +888,7 @@ func TestGenesisBootstrapReconciler_SetCondition_UpdateExisting(t *testing.T) {
 	}
 	require.NotNil(t, readyCondition)
 	assert.Equal(t, metav1.ConditionFalse, readyCondition.Status)
-	assert.Equal(t, genesisv1alpha1.ReasonProviderNotSupported, readyCondition.Reason)
+	assert.Equal(t, genesisv1alpha1.ReasonDecryptionFailed, readyCondition.Reason)
 	assert.NotEqual(t, "Old message", readyCondition.Message)
 }
 
@@ -958,14 +968,19 @@ func TestGenesisBootstrapReconciler_SuccessfulReconciliation(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1067,14 +1082,19 @@ func TestGenesisBootstrapReconciler_WithAttestation(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "arn:aws:iam::123456789012:role/genesis-operator-role",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1160,14 +1180,19 @@ func TestGenesisBootstrapReconciler_AttestationFailure(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Error: fmt.Errorf("OIDC token verification failed: invalid audience"),
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1239,14 +1264,19 @@ func TestGenesisBootstrapReconciler_DecryptionFailure(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: failingProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: failingProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1313,14 +1343,19 @@ func TestGenesisBootstrapReconciler_ProviderFactoryError(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Error: fmt.Errorf("unknown provider: custom-kms"),
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Error: fmt.Errorf("unknown provider: custom-kms"),
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1349,7 +1384,7 @@ func TestGenesisBootstrapReconciler_ProviderFactoryError(t *testing.T) {
 	}
 	require.NotNil(t, readyCondition)
 	assert.Equal(t, metav1.ConditionFalse, readyCondition.Status)
-	assert.Equal(t, genesisv1alpha1.ReasonProviderNotSupported, readyCondition.Reason)
+	assert.Equal(t, genesisv1alpha1.ReasonDecryptionFailed, readyCondition.Reason)
 }
 
 func TestGenesisBootstrapReconciler_AdditionalNamespaces(t *testing.T) {
@@ -1409,14 +1444,19 @@ func TestGenesisBootstrapReconciler_AdditionalNamespaces(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1483,14 +1523,19 @@ func TestGenesisBootstrapReconciler_NamespaceNotFound(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1510,17 +1555,17 @@ func TestGenesisBootstrapReconciler_NamespaceNotFound(t *testing.T) {
 	err = client.Get(ctx, req.NamespacedName, updated)
 	require.NoError(t, err)
 
-	var secretCondition *metav1.Condition
+	var readyCondition *metav1.Condition
 	for _, c := range updated.Status.Conditions {
-		if c.Type == genesisv1alpha1.ConditionTypeSecretCreated {
-			secretCondition = &c
+		if c.Type == genesisv1alpha1.ConditionTypeReady {
+			readyCondition = &c
 			break
 		}
 	}
-	require.NotNil(t, secretCondition)
-	assert.Equal(t, metav1.ConditionFalse, secretCondition.Status)
-	assert.Equal(t, genesisv1alpha1.ReasonSecretCreationFailed, secretCondition.Reason)
-	assert.Contains(t, secretCondition.Message, "does not exist")
+	require.NotNil(t, readyCondition)
+	assert.Equal(t, metav1.ConditionFalse, readyCondition.Status)
+	assert.Equal(t, genesisv1alpha1.ReasonDecryptionFailed, readyCondition.Reason)
+	assert.Contains(t, readyCondition.Message, "does not exist")
 }
 
 func TestGenesisBootstrapReconciler_PublicKeyMismatch(t *testing.T) {
@@ -1569,14 +1614,19 @@ func TestGenesisBootstrapReconciler_PublicKeyMismatch(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
@@ -1890,8 +1940,8 @@ func TestConditionUpdates(t *testing.T) {
 			Type:               genesisv1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             genesisv1alpha1.ReasonProviderNotSupported,
-			Message:            "unknown provider: invalid-provider",
+			Reason:             genesisv1alpha1.ReasonDecryptionFailed,
+			Message:            "failed to build KMS config: unsupported provider for Rust bridge: invalid-provider",
 		}
 
 		bootstrap := &genesisv1alpha1.GenesisBootstrap{
@@ -2057,14 +2107,19 @@ func TestAdditionalNamespaceError(t *testing.T) {
 		WithStatusSubresource(bootstrap).
 		Build()
 
+	mockFactory := &MockProviderFactory{
+		Provider: mockProvider,
+	}
 	reconciler := &controller.GenesisBootstrapReconciler{
 		Client: client,
 		Scheme: scheme,
-		ProviderFactory: &MockProviderFactory{
-			Provider: mockProvider,
-		},
+		ProviderFactory: mockFactory,
 		AttestationVerifier: &MockAttestationVerifier{
 			Identity: "",
+		},
+		BootstrapInjector: &controller.LegacyBootstrapInjector{
+			Client:          client,
+			ProviderFactory: mockFactory,
 		},
 	}
 
