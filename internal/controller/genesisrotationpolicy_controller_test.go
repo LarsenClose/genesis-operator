@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,9 +19,63 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/larsenclose/genesis/internal/bridge"
 	"github.com/larsenclose/genesis/internal/controller"
 	genesisv1alpha1 "github.com/larsenclose/genesis/pkg/api/v1alpha1"
 )
+
+// MockRotationExecutor is a test implementation of RotationExecutor.
+type MockRotationExecutor struct {
+	Artifacts      *bridge.PublicArtifacts
+	Error          error
+	Called         bool
+	CalledSecret   string
+	CalledNs       string
+	CalledKey      string
+}
+
+func (m *MockRotationExecutor) Rotate(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, secretName, secretNamespace, secretKey string) (*bridge.PublicArtifacts, error) {
+	m.Called = true
+	m.CalledSecret = secretName
+	m.CalledNs = secretNamespace
+	m.CalledKey = secretKey
+	if m.Error != nil {
+		return nil, m.Error
+	}
+	return m.Artifacts, nil
+}
+
+func newMockExecutor() *MockRotationExecutor {
+	return &MockRotationExecutor{
+		Artifacts: &bridge.PublicArtifacts{
+			PublicKey:          "age1testrotatedpublickey",
+			EnvelopeCiphertext: []byte("new-encrypted-envelope-bytes"),
+		},
+	}
+}
+
+// testBootstrap creates a GenesisBootstrap CR for test use, matching the given
+// secret name and namespace.
+func testBootstrap(secretName, secretNamespace string) *genesisv1alpha1.GenesisBootstrap {
+	return &genesisv1alpha1.GenesisBootstrap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-bootstrap",
+			Namespace: "default",
+		},
+		Spec: genesisv1alpha1.GenesisBootstrapSpec{
+			Envelope: genesisv1alpha1.EnvelopeSpec{
+				Provider:   "mock",
+				Ciphertext: "dGVzdC1jaXBoZXJ0ZXh0", // base64("test-ciphertext")
+				PublicKey:  "age1testpublickey",
+			},
+			Output: genesisv1alpha1.OutputSpec{
+				SecretName:      secretName,
+				SecretNamespace: secretNamespace,
+				SecretKey:       "age.agekey",
+			},
+		},
+	}
+}
 
 func setupRotationScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
@@ -386,6 +441,8 @@ func TestGenesisRotationPolicyReconciler_RotationDue(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -406,17 +463,19 @@ func TestGenesisRotationPolicyReconciler_RotationDue(t *testing.T) {
 		},
 	}
 
+	mockExecutor := newMockExecutor()
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret).
+		WithObjects(policy, sourceSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	recorder := record.NewFakeRecorder(10)
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: recorder,
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: mockExecutor,
 	}
 
 	req := reconcile.Request{
@@ -431,6 +490,9 @@ func TestGenesisRotationPolicyReconciler_RotationDue(t *testing.T) {
 	// Should requeue after 24h for next rotation
 	assert.True(t, result.RequeueAfter > 23*time.Hour)
 
+	// Verify mock executor was called
+	assert.True(t, mockExecutor.Called)
+
 	// Verify rotation count was incremented
 	updated := &genesisv1alpha1.GenesisRotationPolicy{}
 	err = client.Get(context.Background(), req.NamespacedName, updated)
@@ -441,6 +503,15 @@ func TestGenesisRotationPolicyReconciler_RotationDue(t *testing.T) {
 	require.NotNil(t, updated.Status.LastRotation)
 	assert.True(t, updated.Status.LastRotation.Success)
 	assert.Equal(t, "Rotation completed successfully", updated.Status.LastRotation.Message)
+
+	// Verify GenesisBootstrap was updated with new envelope
+	updatedBootstrap := &genesisv1alpha1.GenesisBootstrap{}
+	err = client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-bootstrap",
+		Namespace: "default",
+	}, updatedBootstrap)
+	require.NoError(t, err)
+	assert.Equal(t, "age1testrotatedpublickey", updatedBootstrap.Spec.Envelope.PublicKey)
 
 	// Check for event
 	select {
@@ -469,6 +540,8 @@ func TestGenesisRotationPolicyReconciler_RotationStrategies(t *testing.T) {
 				},
 			}
 
+			bootstrap := testBootstrap("source-secret", "default")
+
 			policy := &genesisv1alpha1.GenesisRotationPolicy{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "test-policy",
@@ -489,16 +562,18 @@ func TestGenesisRotationPolicyReconciler_RotationStrategies(t *testing.T) {
 				},
 			}
 
+			mockExecutor := newMockExecutor()
 			client := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(policy, sourceSecret).
+				WithObjects(policy, sourceSecret, bootstrap).
 				WithStatusSubresource(policy).
 				Build()
 
 			reconciler := &controller.GenesisRotationPolicyReconciler{
-				Client:   client,
-				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Client:           client,
+				Scheme:           scheme,
+				Recorder:         record.NewFakeRecorder(10),
+				RotationExecutor: mockExecutor,
 			}
 
 			req := reconcile.Request{
@@ -521,6 +596,7 @@ func TestGenesisRotationPolicyReconciler_RotationStrategies(t *testing.T) {
 			require.NoError(t, err)
 			assert.Contains(t, updatedSecret.Annotations, "genesis.io/rotated-at")
 			assert.Contains(t, updatedSecret.Annotations, "genesis.io/rotation-version")
+			assert.Contains(t, updatedSecret.Annotations, "genesis.io/rotation-strategy")
 		})
 	}
 }
@@ -611,6 +687,8 @@ func TestGenesisRotationPolicyReconciler_WebhookNotification(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -639,14 +717,15 @@ func TestGenesisRotationPolicyReconciler_WebhookNotification(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret, webhookSecret).
+		WithObjects(policy, sourceSecret, webhookSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -700,6 +779,8 @@ func TestGenesisRotationPolicyReconciler_SlackNotification(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -729,14 +810,15 @@ func TestGenesisRotationPolicyReconciler_SlackNotification(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret, webhookSecret).
+		WithObjects(policy, sourceSecret, webhookSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -773,6 +855,8 @@ func TestGenesisRotationPolicyReconciler_WebhookSecretMissing(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -801,14 +885,15 @@ func TestGenesisRotationPolicyReconciler_WebhookSecretMissing(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret).
+		WithObjects(policy, sourceSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -856,6 +941,8 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -884,14 +971,15 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret, pdSecret).
+		WithObjects(policy, sourceSecret, pdSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -932,6 +1020,8 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_MissingSecretRef(
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	// Policy with PagerDuty notification but NO webhookSecretRef
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -958,14 +1048,15 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_MissingSecretRef(
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret).
+		WithObjects(policy, sourceSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -1002,6 +1093,8 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_SecretNotFound(t 
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	// Policy references a non-existent secret
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1031,14 +1124,15 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_SecretNotFound(t 
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret).
+		WithObjects(policy, sourceSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -1089,6 +1183,8 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_WithDifferentStra
 				},
 			}
 
+			bootstrap := testBootstrap("source-secret", "default")
+
 			policy := &genesisv1alpha1.GenesisRotationPolicy{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "test-policy",
@@ -1120,14 +1216,15 @@ func TestGenesisRotationPolicyReconciler_PagerDutyNotification_WithDifferentStra
 
 			client := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(policy, sourceSecret, pdSecret).
+				WithObjects(policy, sourceSecret, pdSecret, bootstrap).
 				WithStatusSubresource(policy).
 				Build()
 
 			reconciler := &controller.GenesisRotationPolicyReconciler{
-				Client:   client,
-				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Client:           client,
+				Scheme:           scheme,
+				Recorder:         record.NewFakeRecorder(10),
+				RotationExecutor: newMockExecutor(),
 			}
 
 			req := reconcile.Request{
@@ -1219,6 +1316,8 @@ func TestGenesisRotationPolicyReconciler_MultipleRotations(t *testing.T) {
 		},
 	}
 
+	bootstrap := testBootstrap("source-secret", "default")
+
 	policy := &genesisv1alpha1.GenesisRotationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "test-policy",
@@ -1245,14 +1344,15 @@ func TestGenesisRotationPolicyReconciler_MultipleRotations(t *testing.T) {
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(policy, sourceSecret).
+		WithObjects(policy, sourceSecret, bootstrap).
 		WithStatusSubresource(policy).
 		Build()
 
 	reconciler := &controller.GenesisRotationPolicyReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: newMockExecutor(),
 	}
 
 	req := reconcile.Request{
@@ -1373,4 +1473,338 @@ func TestWebhookPayloadStructure(t *testing.T) {
 	assert.Equal(t, true, rotation["success"])
 	assert.Equal(t, "v1", rotation["oldVersion"])
 	assert.Equal(t, "v2", rotation["newVersion"])
+}
+
+// --- New tests for RotationExecutor wiring ---
+
+func TestFindGenesisBootstrap(t *testing.T) {
+	t.Run("Found", func(t *testing.T) {
+		scheme := setupRotationScheme()
+
+		bootstrap := testBootstrap("my-secret", "production")
+
+		sourceSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "my-secret",
+				Namespace:         "production",
+				CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+			},
+			Data: map[string][]byte{
+				"key": []byte("value"),
+			},
+		}
+
+		policy := &genesisv1alpha1.GenesisRotationPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-policy",
+				Namespace:  "default",
+				Finalizers: []string{"genesis.io/rotation-finalizer"},
+			},
+			Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+				Source: genesisv1alpha1.RotationSourceSpec{
+					Name:      "my-secret",
+					Namespace: "production",
+				},
+				Schedule: genesisv1alpha1.RotationScheduleSpec{
+					Interval: "24h",
+				},
+			},
+		}
+
+		mockExecutor := newMockExecutor()
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(policy, sourceSecret, bootstrap).
+			WithStatusSubresource(policy).
+			Build()
+
+		reconciler := &controller.GenesisRotationPolicyReconciler{
+			Client:           client,
+			Scheme:           scheme,
+			Recorder:         record.NewFakeRecorder(10),
+			RotationExecutor: mockExecutor,
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-policy",
+				Namespace: "default",
+			},
+		}
+
+		// Reconcile triggers rotation (secret is old enough)
+		result, err := reconciler.Reconcile(context.Background(), req)
+		require.NoError(t, err)
+		assert.True(t, result.RequeueAfter > 0)
+
+		// Verify the mock was called with the correct secret details
+		assert.True(t, mockExecutor.Called)
+		assert.Equal(t, "my-secret", mockExecutor.CalledSecret)
+		assert.Equal(t, "production", mockExecutor.CalledNs)
+		assert.Equal(t, "age.agekey", mockExecutor.CalledKey)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		scheme := setupRotationScheme()
+
+		// No GenesisBootstrap exists for this secret
+		sourceSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "orphan-secret",
+				Namespace:         "default",
+				CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+			},
+			Data: map[string][]byte{
+				"key": []byte("value"),
+			},
+		}
+
+		policy := &genesisv1alpha1.GenesisRotationPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-policy",
+				Namespace:  "default",
+				Finalizers: []string{"genesis.io/rotation-finalizer"},
+			},
+			Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+				Source: genesisv1alpha1.RotationSourceSpec{
+					Name:      "orphan-secret",
+					Namespace: "default",
+				},
+				Schedule: genesisv1alpha1.RotationScheduleSpec{
+					Interval: "24h",
+				},
+			},
+		}
+
+		mockExecutor := newMockExecutor()
+		client := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(policy, sourceSecret).
+			WithStatusSubresource(policy).
+			Build()
+
+		reconciler := &controller.GenesisRotationPolicyReconciler{
+			Client:           client,
+			Scheme:           scheme,
+			Recorder:         record.NewFakeRecorder(10),
+			RotationExecutor: mockExecutor,
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-policy",
+				Namespace: "default",
+			},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), req)
+		require.NoError(t, err)
+		// Should requeue with backoff on failure
+		assert.Equal(t, time.Minute, result.RequeueAfter)
+
+		// Mock should NOT have been called because findGenesisBootstrap fails first
+		assert.False(t, mockExecutor.Called)
+
+		// Verify failure condition was set
+		updated := &genesisv1alpha1.GenesisRotationPolicy{}
+		err = client.Get(context.Background(), req.NamespacedName, updated)
+		require.NoError(t, err)
+
+		var foundCondition *metav1.Condition
+		for _, c := range updated.Status.Conditions {
+			if c.Type == genesisv1alpha1.ConditionTypeRotationReady {
+				foundCondition = &c
+				break
+			}
+		}
+		require.NotNil(t, foundCondition)
+		assert.Equal(t, metav1.ConditionFalse, foundCondition.Status)
+		assert.Contains(t, foundCondition.Message, "cannot find GenesisBootstrap")
+	})
+}
+
+func TestRotationWithBridgeExecutor(t *testing.T) {
+	scheme := setupRotationScheme()
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+		},
+		Data: map[string][]byte{
+			"key": []byte("value"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	mockExecutor := newMockExecutor()
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         record.NewFakeRecorder(10),
+		RotationExecutor: mockExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 0)
+
+	// Verify executor was called
+	assert.True(t, mockExecutor.Called)
+
+	// Verify GenesisBootstrap spec was updated with new envelope data
+	updatedBootstrap := &genesisv1alpha1.GenesisBootstrap{}
+	err = client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-bootstrap",
+		Namespace: "default",
+	}, updatedBootstrap)
+	require.NoError(t, err)
+	assert.Equal(t, "age1testrotatedpublickey", updatedBootstrap.Spec.Envelope.PublicKey)
+	// EnvelopeCiphertext is base64-encoded when stored in CR
+	assert.NotEqual(t, "dGVzdC1jaXBoZXJ0ZXh0", updatedBootstrap.Spec.Envelope.Ciphertext)
+}
+
+func TestRotationExecutorError(t *testing.T) {
+	scheme := setupRotationScheme()
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+		},
+		Data: map[string][]byte{
+			"key": []byte("value"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	failingExecutor := &MockRotationExecutor{
+		Error: fmt.Errorf("KMS provider unavailable"),
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: failingExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	// Should requeue with backoff on failure
+	assert.Equal(t, time.Minute, result.RequeueAfter)
+
+	// Verify the executor was called
+	assert.True(t, failingExecutor.Called)
+
+	// Verify failure condition
+	updated := &genesisv1alpha1.GenesisRotationPolicy{}
+	err = client.Get(context.Background(), req.NamespacedName, updated)
+	require.NoError(t, err)
+
+	var foundCondition *metav1.Condition
+	for _, c := range updated.Status.Conditions {
+		if c.Type == genesisv1alpha1.ConditionTypeRotationReady {
+			foundCondition = &c
+			break
+		}
+	}
+	require.NotNil(t, foundCondition)
+	assert.Equal(t, metav1.ConditionFalse, foundCondition.Status)
+	assert.Contains(t, foundCondition.Message, "rotation failed")
+
+	// Verify rotation count was NOT incremented
+	assert.Equal(t, int64(0), updated.Status.RotationCount)
+
+	// Verify RotationFailed event was emitted
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "RotationFailed")
+	default:
+		t.Error("Expected RotationFailed event")
+	}
+}
+
+func TestGetRotationExecutor(t *testing.T) {
+	t.Run("DefaultReturnsBridgeRotationExecutor", func(t *testing.T) {
+		reconciler := &controller.GenesisRotationPolicyReconciler{
+			// RotationExecutor not set -- should use default
+		}
+		executor := reconciler.GetRotationExecutor()
+		_, ok := executor.(*controller.BridgeRotationExecutor)
+		assert.True(t, ok, "Expected BridgeRotationExecutor as default")
+	})
+
+	t.Run("ExplicitOverrideRespected", func(t *testing.T) {
+		mock := newMockExecutor()
+		reconciler := &controller.GenesisRotationPolicyReconciler{
+			RotationExecutor: mock,
+		}
+		executor := reconciler.GetRotationExecutor()
+		assert.Equal(t, mock, executor)
+	})
 }

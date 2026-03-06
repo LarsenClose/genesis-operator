@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/larsenclose/genesis/internal/bridge"
 	genesisv1alpha1 "github.com/larsenclose/genesis/pkg/api/v1alpha1"
 )
 
@@ -27,16 +29,88 @@ const (
 	rotationFinalizerName = "genesis.io/rotation-finalizer"
 )
 
+// RotationExecutor abstracts the cryptographic key rotation flow.
+// Production uses the Rust bridge (BridgeRotationExecutor); tests use
+// a mock implementation.
+type RotationExecutor interface {
+	Rotate(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, secretName, secretNamespace, secretKey string) (*bridge.PublicArtifacts, error)
+}
+
+// BridgeRotationExecutor implements RotationExecutor using the Rust bridge.
+// The full rotation flow runs entirely in Rust memory: decrypt existing
+// envelope, inject current secret (to reach Active), begin rotation,
+// complete rotation (new keypair + re-encrypt + inject new secret).
+type BridgeRotationExecutor struct{}
+
+// Rotate implements RotationExecutor via the Rust bridge path.
+func (e *BridgeRotationExecutor) Rotate(ctx context.Context, bootstrap *genesisv1alpha1.GenesisBootstrap, secretName, secretNamespace, secretKey string) (*bridge.PublicArtifacts, error) {
+	// 1. Build KMS config JSON from the GenesisBootstrap's envelope spec
+	kmsConfigJSON, err := bridge.BuildKmsConfigJSON(&bootstrap.Spec.Envelope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build KMS config: %w", err)
+	}
+
+	// 2. Create bridge handle
+	handle, err := bridge.New(kmsConfigJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bridge handle: %w", err)
+	}
+	defer handle.Free()
+
+	// 3. Decode ciphertext and load existing config (public key + ciphertext)
+	ciphertext, err := base64.StdEncoding.DecodeString(bootstrap.Spec.Envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode ciphertext: %w", err)
+	}
+
+	if err := handle.Load(bootstrap.Spec.Envelope.PublicKey, ciphertext); err != nil {
+		return nil, fmt.Errorf("failed to load envelope: %w", err)
+	}
+
+	// 4. Begin bootstrap to reach Bootstrapping state (decrypts existing envelope)
+	if err := handle.BeginBootstrap(kmsConfigJSON); err != nil {
+		return nil, fmt.Errorf("failed to begin bootstrap: %w", err)
+	}
+
+	// 5. Inject existing secret to reach Active state
+	if err := handle.InjectSecret(secretName, secretNamespace, secretKey); err != nil {
+		return nil, fmt.Errorf("failed to inject secret: %w", err)
+	}
+
+	// 6. Begin rotation (Active -> Rotating)
+	if err := handle.BeginRotation(); err != nil {
+		return nil, fmt.Errorf("failed to begin rotation: %w", err)
+	}
+
+	// 7. Complete rotation -- generates new keypair, KMS encrypts, injects new key
+	artifacts, err := handle.CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to complete rotation: %w", err)
+	}
+
+	return artifacts, nil
+}
+
 // GenesisRotationPolicyReconciler reconciles a GenesisRotationPolicy object
 type GenesisRotationPolicyReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Scheme           *runtime.Scheme
+	Recorder         record.EventRecorder
+	RotationExecutor RotationExecutor // If nil, uses BridgeRotationExecutor
+}
+
+// GetRotationExecutor returns the configured rotation executor or the default.
+func (r *GenesisRotationPolicyReconciler) GetRotationExecutor() RotationExecutor {
+	if r.RotationExecutor != nil {
+		return r.RotationExecutor
+	}
+	return &BridgeRotationExecutor{}
 }
 
 // +kubebuilder:rbac:groups=genesis.io,resources=genesisrotationpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=genesis.io,resources=genesisrotationpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=genesis.io,resources=genesisrotationpolicies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=genesis.io,resources=genesisbootstraps,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -231,75 +305,65 @@ func (r *GenesisRotationPolicyReconciler) performRotation(ctx context.Context, p
 		strategyType = policy.Spec.Strategy.Type
 	}
 
-	switch strategyType {
-	case "BlueGreen":
-		return r.performBlueGreenRotation(ctx, policy, secret)
-	case "Rolling":
-		return r.performRollingRotation(ctx, policy, secret)
-	case "Immediate":
-		return r.performImmediateRotation(ctx, policy, secret)
-	default:
-		logger.Info("Unknown strategy, using BlueGreen", "strategy", strategyType)
-		return r.performBlueGreenRotation(ctx, policy, secret)
+	// 1. Find the managing GenesisBootstrap CR
+	bootstrap, err := r.findGenesisBootstrap(ctx, policy.Spec.Source.Name, policy.Spec.Source.Namespace)
+	if err != nil {
+		return fmt.Errorf("cannot find GenesisBootstrap for rotation: %w", err)
 	}
+
+	// 2. Determine the secret key (from the GenesisBootstrap output spec)
+	secretKey := bootstrap.Spec.Output.SecretKey
+
+	// 3. Execute cryptographic rotation via bridge
+	executor := r.GetRotationExecutor()
+	artifacts, err := executor.Rotate(ctx, bootstrap, policy.Spec.Source.Name, policy.Spec.Source.Namespace, secretKey)
+	if err != nil {
+		return fmt.Errorf("rotation failed: %w", err)
+	}
+
+	// 4. Update GenesisBootstrap CR with new envelope
+	bootstrap.Spec.Envelope.Ciphertext = base64.StdEncoding.EncodeToString(artifacts.EnvelopeCiphertext)
+	bootstrap.Spec.Envelope.PublicKey = artifacts.PublicKey
+	if err := r.Update(ctx, bootstrap); err != nil {
+		return fmt.Errorf("failed to update GenesisBootstrap after rotation: %w", err)
+	}
+
+	// 5. Apply strategy-specific post-rotation annotations
+	r.applyRotationAnnotations(ctx, secret, policy, strategyType)
+
+	logger.Info("Cryptographic rotation completed", "strategy", strategyType)
+	return nil
 }
 
-func (r *GenesisRotationPolicyReconciler) performBlueGreenRotation(ctx context.Context, policy *genesisv1alpha1.GenesisRotationPolicy, secret *corev1.Secret) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Performing BlueGreen rotation")
+// findGenesisBootstrap finds the GenesisBootstrap CR that manages the given secret.
+func (r *GenesisRotationPolicyReconciler) findGenesisBootstrap(ctx context.Context, secretName, secretNamespace string) (*genesisv1alpha1.GenesisBootstrap, error) {
+	var bootstrapList genesisv1alpha1.GenesisBootstrapList
+	if err := r.List(ctx, &bootstrapList); err != nil {
+		return nil, fmt.Errorf("failed to list GenesisBootstrap resources: %w", err)
+	}
 
-	// For BlueGreen strategy, we create a new version of the secret
-	// and keep the old one around for the overlap period
+	for i := range bootstrapList.Items {
+		b := &bootstrapList.Items[i]
+		if b.Spec.Output.SecretName == secretName && b.Spec.Output.SecretNamespace == secretNamespace {
+			return b, nil
+		}
+	}
 
-	// Add rotation annotation to track version
+	return nil, fmt.Errorf("no GenesisBootstrap found for secret %s/%s", secretNamespace, secretName)
+}
+
+// applyRotationAnnotations updates secret annotations after a successful rotation.
+func (r *GenesisRotationPolicyReconciler) applyRotationAnnotations(ctx context.Context, secret *corev1.Secret, policy *genesisv1alpha1.GenesisRotationPolicy, strategy string) {
 	if secret.Annotations == nil {
 		secret.Annotations = make(map[string]string)
 	}
 	secret.Annotations["genesis.io/rotated-at"] = time.Now().Format(time.RFC3339)
 	secret.Annotations["genesis.io/rotation-version"] = fmt.Sprintf("%d", policy.Status.RotationCount+1)
-
-	// Update the secret (in a real implementation, this would regenerate secret values)
-	if err := r.Update(ctx, secret); err != nil {
-		return fmt.Errorf("failed to update secret during rotation: %w", err)
-	}
-
-	return nil
-}
-
-func (r *GenesisRotationPolicyReconciler) performRollingRotation(ctx context.Context, policy *genesisv1alpha1.GenesisRotationPolicy, secret *corev1.Secret) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Performing Rolling rotation")
-
-	// Rolling rotation updates the secret in-place
-	if secret.Annotations == nil {
-		secret.Annotations = make(map[string]string)
-	}
-	secret.Annotations["genesis.io/rotated-at"] = time.Now().Format(time.RFC3339)
-	secret.Annotations["genesis.io/rotation-version"] = fmt.Sprintf("%d", policy.Status.RotationCount+1)
+	secret.Annotations["genesis.io/rotation-strategy"] = strategy
 
 	if err := r.Update(ctx, secret); err != nil {
-		return fmt.Errorf("failed to update secret during rotation: %w", err)
+		log.FromContext(ctx).Error(err, "Failed to update secret annotations after rotation")
 	}
-
-	return nil
-}
-
-func (r *GenesisRotationPolicyReconciler) performImmediateRotation(ctx context.Context, policy *genesisv1alpha1.GenesisRotationPolicy, secret *corev1.Secret) error {
-	logger := log.FromContext(ctx)
-	logger.Info("Performing Immediate rotation")
-
-	// Immediate rotation updates the secret immediately with no overlap
-	if secret.Annotations == nil {
-		secret.Annotations = make(map[string]string)
-	}
-	secret.Annotations["genesis.io/rotated-at"] = time.Now().Format(time.RFC3339)
-	secret.Annotations["genesis.io/rotation-version"] = fmt.Sprintf("%d", policy.Status.RotationCount+1)
-
-	if err := r.Update(ctx, secret); err != nil {
-		return fmt.Errorf("failed to update secret during rotation: %w", err)
-	}
-
-	return nil
 }
 
 func (r *GenesisRotationPolicyReconciler) sendNotifications(ctx context.Context, policy *genesisv1alpha1.GenesisRotationPolicy) {
