@@ -11,6 +11,8 @@ Genesis provides a single, identity-based bootstrap mechanism that works across 
 ## Key Features
 
 - **Envelope Encryption**: KMS encrypts age key, age encrypts secrets - avoids KMS API limits and enables offline secret management
+- **Security Invariant**: All key material operations execute in Rust via CGO FFI -- plaintext keys never enter Go memory
+- **Post-Quantum Readiness**: ML-KEM-1024 key encapsulation and ML-DSA-87 digital signatures available for envelope protection
 - **Identity-Based Access**: Clusters prove identity cryptographically via OIDC/IRSA/Workload Identity/Instance Principal, not pre-shared secrets
 - **GitOps Native**: All configuration lives in git, operator is fully declarative
 - **Multi-Cloud Support**: AWS KMS, GCP Cloud KMS, Azure Key Vault, OCI Vault
@@ -184,11 +186,11 @@ Use `genesis <command> --help` for detailed usage.
 
 ### Security Architecture
 
-Genesis Operator enforces a strict security boundary: **all key material operations execute in a Rust static library** (`genesis-core`) linked into the Go binary via CGO.
+Genesis Operator enforces a strict security boundary: **all key material operations execute in a Rust static library** (`genesis-core`) linked into the Go binary via CGO. The Go controller orchestrates reconciliation and Kubernetes API interactions, but plaintext key material never crosses the FFI boundary into Go memory. The `BootstrapInjector` strategy pattern ensures this invariant holds for both production (bridge) and test paths.
 
 ```
 genesis CLI / K8s Controller (Go)
-        |
+        |  (no plaintext keys cross this boundary)
         v
    CGO Bridge (internal/bridge/)
         |
@@ -197,7 +199,8 @@ genesis CLI / K8s Controller (Go)
    ├── Typestate machine (6 states, compile-time enforced)
    ├── KeyMaterial (Zeroizing + mlock, no Clone/Debug/Serialize)
    ├── KMS providers (AWS, GCP, Azure, OCI Vault)
-   └── age X25519 envelope crypto
+   ├── Envelope encryption (age X25519)
+   └── Post-quantum crypto (ML-KEM-1024, ML-DSA-87)
 ```
 
 **Build prerequisites:** Rust toolchain (see `rust-toolchain.toml`), `cbindgen`, and `CGO_ENABLED=1`.
