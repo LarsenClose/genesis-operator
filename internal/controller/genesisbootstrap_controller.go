@@ -469,14 +469,6 @@ type GenesisBootstrapReconciler struct {
 	genesisHandle *bridge.Handle
 }
 
-// getProviderFactory returns the configured provider factory or the default
-func (r *GenesisBootstrapReconciler) getProviderFactory() ProviderFactory {
-	if r.ProviderFactory != nil {
-		return r.ProviderFactory
-	}
-	return &DefaultProviderFactory{}
-}
-
 // getAttestationVerifier returns the configured attestation verifier or the default
 func (r *GenesisBootstrapReconciler) getAttestationVerifier() AttestationVerifier {
 	if r.AttestationVerifier != nil {
