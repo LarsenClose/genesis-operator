@@ -383,7 +383,15 @@ fn init_standalone_full_lifecycle() {
 
     // 11. complete_rotation() -> Active with a new keypair.
     let (new_active, new_artifacts) = rotating
-        .complete_rotation(&kms, &injector, "genesis-key", "genesis-system", "age.key")
+        .complete_rotation(
+            &kms,
+            &injector,
+            "genesis-key",
+            "genesis-system",
+            "age.key",
+            None,
+            None,
+        )
         .expect("complete_rotation should succeed");
 
     // 12. Verify the rotated key differs from the original.

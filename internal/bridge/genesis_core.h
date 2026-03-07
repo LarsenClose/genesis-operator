@@ -150,7 +150,9 @@ struct GenesisResult genesis_begin_bootstrap(struct GenesisHandle handle,
 struct GenesisResult genesis_inject_secret(struct GenesisHandle handle,
                                            const char *secret_name,
                                            const char *secret_namespace,
-                                           const char *secret_key);
+                                           const char *secret_key,
+                                           const char *bootstrap_name_ptr,
+                                           const char *bootstrap_namespace_ptr);
 
 /**
  * Inject the decrypted key material into multiple Kubernetes secrets
@@ -189,6 +191,15 @@ struct GenesisResult genesis_status(struct GenesisHandle handle, char **status_j
 struct GenesisResult genesis_begin_rotation(struct GenesisHandle handle);
 
 /**
+ * Abort a rotation in progress and return to `Active` with the original key.
+ *
+ * # Safety
+ *
+ * `handle` must be a valid `GenesisHandle` in the `Rotating` state.
+ */
+struct GenesisResult genesis_abort_rotation(struct GenesisHandle handle);
+
+/**
  * Complete the rotation: generate new keypair, re-encrypt, inject,
  * transition to `Active`.
  *
@@ -198,12 +209,15 @@ struct GenesisResult genesis_begin_rotation(struct GenesisHandle handle);
  *
  * `handle` must be a valid `GenesisHandle` in the `Rotating` state.
  * String parameters must be valid NUL-terminated C strings.
+ * `bootstrap_name_ptr` and `bootstrap_namespace_ptr` are optional (may be NULL).
  */
 struct GenesisResult genesis_complete_rotation(struct GenesisHandle handle,
                                                const char *kms_config_json,
                                                const char *secret_name,
                                                const char *secret_namespace,
-                                               const char *secret_key);
+                                               const char *secret_key,
+                                               const char *bootstrap_name_ptr,
+                                               const char *bootstrap_namespace_ptr);
 
 /**
  * Free a `GenesisHandle` and all associated resources.

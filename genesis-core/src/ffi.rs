@@ -35,6 +35,10 @@ struct InjectTarget {
     name: String,
     namespace: String,
     key: String,
+    #[serde(default)]
+    bootstrap_name: Option<String>,
+    #[serde(default)]
+    bootstrap_namespace: Option<String>,
 }
 
 // ── Callback types ───────────────────────────────────────────────────
@@ -210,6 +214,15 @@ unsafe fn parse_c_str<'a>(ptr: *const c_char) -> Result<&'a str, GenesisResult> 
     CStr::from_ptr(ptr)
         .to_str()
         .map_err(|e| error_result(1, &format!("invalid UTF-8: {e}")))
+}
+
+/// Parse an optional NUL-terminated C string.  Returns `None` if `ptr`
+/// is null, `Some(String)` otherwise.  Invalid UTF-8 maps to `None`.
+unsafe fn optional_c_str(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string())
 }
 
 /// Parse a KMS config JSON string into a [`KmsConfig`].
@@ -549,6 +562,8 @@ pub unsafe extern "C" fn genesis_inject_secret(
     secret_name: *const c_char,
     secret_namespace: *const c_char,
     secret_key: *const c_char,
+    bootstrap_name_ptr: *const c_char,
+    bootstrap_namespace_ptr: *const c_char,
 ) -> GenesisResult {
     panic::catch_unwind(|| {
         let inner = match take_inner(handle) {
@@ -642,6 +657,8 @@ pub unsafe extern "C" fn genesis_inject_secret(
         let metadata = crate::k8s::SecretMetadata {
             provider_type: Some(bootstrapping.config_ref().provider_type.clone()),
             public_key: bootstrapping.config_ref().public_key.clone(),
+            bootstrap_name: optional_c_str(bootstrap_name_ptr),
+            bootstrap_namespace: optional_c_str(bootstrap_namespace_ptr),
         };
 
         match bootstrapping.inject_secret_with_metadata(&*injector, name, ns, key, Some(&metadata))
@@ -761,9 +778,13 @@ pub unsafe extern "C" fn genesis_inject_secrets(
         };
 
         // Build metadata from the bootstrapping state's config.
+        // Pick up bootstrap_name/namespace from the first target (all targets
+        // belong to the same GenesisBootstrap CR).
         let metadata = crate::k8s::SecretMetadata {
             provider_type: Some(bootstrapping.config_ref().provider_type.clone()),
             public_key: bootstrapping.config_ref().public_key.clone(),
+            bootstrap_name: targets.first().and_then(|t| t.bootstrap_name.clone()),
+            bootstrap_namespace: targets.first().and_then(|t| t.bootstrap_namespace.clone()),
         };
 
         match bootstrapping.inject_secrets_multi(&*injector, &target_tuples, Some(&metadata)) {
@@ -865,6 +886,38 @@ pub unsafe extern "C" fn genesis_begin_rotation(handle: GenesisHandle) -> Genesi
     .unwrap_or_else(|_| panic_result())
 }
 
+/// Abort a rotation in progress and return to `Active` with the original key.
+///
+/// # Safety
+///
+/// `handle` must be a valid `GenesisHandle` in the `Rotating` state.
+#[no_mangle]
+pub unsafe extern "C" fn genesis_abort_rotation(handle: GenesisHandle) -> GenesisResult {
+    panic::catch_unwind(|| {
+        let inner = match take_inner(handle) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+
+        let genesis = match inner {
+            GenesisInner::Rotating(g) => g,
+            other => {
+                let handle = inner_to_handle(other);
+                return error_with_handle(
+                    102,
+                    "invalid state: genesis_abort_rotation requires Rotating state",
+                    handle,
+                );
+            }
+        };
+
+        let active = genesis.abort_rotation();
+        let new_inner = GenesisInner::Active(active);
+        success_result(inner_to_handle(new_inner))
+    })
+    .unwrap_or_else(|_| panic_result())
+}
+
 /// Complete the rotation: generate new keypair, re-encrypt, inject,
 /// transition to `Active`.
 ///
@@ -874,6 +927,7 @@ pub unsafe extern "C" fn genesis_begin_rotation(handle: GenesisHandle) -> Genesi
 ///
 /// `handle` must be a valid `GenesisHandle` in the `Rotating` state.
 /// String parameters must be valid NUL-terminated C strings.
+/// `bootstrap_name_ptr` and `bootstrap_namespace_ptr` are optional (may be NULL).
 #[no_mangle]
 pub unsafe extern "C" fn genesis_complete_rotation(
     handle: GenesisHandle,
@@ -881,6 +935,8 @@ pub unsafe extern "C" fn genesis_complete_rotation(
     secret_name: *const c_char,
     secret_namespace: *const c_char,
     secret_key: *const c_char,
+    bootstrap_name_ptr: *const c_char,
+    bootstrap_namespace_ptr: *const c_char,
 ) -> GenesisResult {
     panic::catch_unwind(|| {
         let inner = match take_inner(handle) {
@@ -982,7 +1038,17 @@ pub unsafe extern "C" fn genesis_complete_rotation(
             }
         };
 
-        match genesis.complete_rotation(&*provider, &*injector, name, ns, key) {
+        let boot_name = optional_c_str(bootstrap_name_ptr);
+        let boot_ns = optional_c_str(bootstrap_namespace_ptr);
+        match genesis.complete_rotation(
+            &*provider,
+            &*injector,
+            name,
+            ns,
+            key,
+            boot_name.as_deref(),
+            boot_ns.as_deref(),
+        ) {
             Ok((active, artifacts)) => {
                 let new_inner = GenesisInner::Active(active);
                 let json = match serde_json::to_string(&artifacts) {
@@ -1854,7 +1920,16 @@ mod tests {
         let name = CString::new("genesis-key").unwrap();
         let ns = CString::new("genesis-system").unwrap();
         let key = CString::new("age.key").unwrap();
-        let r = unsafe { genesis_inject_secret(handle, name.as_ptr(), ns.as_ptr(), key.as_ptr()) };
+        let r = unsafe {
+            genesis_inject_secret(
+                handle,
+                name.as_ptr(),
+                ns.as_ptr(),
+                key.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert!(r.success, "genesis_inject_secret should succeed");
         assert_eq!(r.handle.state, StateTag::Active);
         let handle = r.handle;
@@ -1889,6 +1964,8 @@ mod tests {
                 name.as_ptr(),
                 ns.as_ptr(),
                 key.as_ptr(),
+                ptr::null(),
+                ptr::null(),
             )
         };
         assert!(r.success, "genesis_complete_rotation should succeed");
@@ -2128,6 +2205,88 @@ mod tests {
             r.handle.state,
             StateTag::Bootstrapping,
             "handle should still be in Bootstrapping state"
+        );
+
+        unsafe {
+            genesis_free_string(r.error_message);
+            genesis_free(r.handle);
+        }
+    }
+
+    #[test]
+    fn ffi_abort_rotation() {
+        // new -> init -> begin_bootstrap -> inject_secret -> begin_rotation -> abort_rotation
+        let config = mock_config_json();
+        let kms_config = mock_kms_config_json();
+
+        // 1. genesis_new
+        let r = unsafe { genesis_new(config.as_ptr(), None) };
+        assert!(r.success);
+        let handle = r.handle;
+
+        // 2. genesis_init
+        let r = unsafe { genesis_init(handle, kms_config.as_ptr()) };
+        assert!(r.success);
+        unsafe { genesis_free_string(r.data_json) };
+        let handle = r.handle;
+
+        // 3. genesis_begin_bootstrap
+        let r = unsafe { genesis_begin_bootstrap(handle, kms_config.as_ptr()) };
+        assert!(r.success);
+        let handle = r.handle;
+
+        // 4. genesis_inject_secret
+        let name = CString::new("genesis-key").unwrap();
+        let ns = CString::new("genesis-system").unwrap();
+        let key = CString::new("age.key").unwrap();
+        let r = unsafe {
+            genesis_inject_secret(
+                handle,
+                name.as_ptr(),
+                ns.as_ptr(),
+                key.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        assert!(r.success);
+        assert_eq!(r.handle.state, StateTag::Active);
+        let handle = r.handle;
+
+        // 5. genesis_begin_rotation
+        let r = unsafe { genesis_begin_rotation(handle) };
+        assert!(r.success);
+        assert_eq!(r.handle.state, StateTag::Rotating);
+        let handle = r.handle;
+
+        // 6. genesis_abort_rotation -> should return to Active
+        let r = unsafe { genesis_abort_rotation(handle) };
+        assert!(r.success, "genesis_abort_rotation should succeed");
+        assert_eq!(r.handle.state, StateTag::Active);
+
+        unsafe { genesis_free(r.handle) };
+    }
+
+    #[test]
+    fn ffi_abort_rotation_wrong_state() {
+        let config = mock_config_json();
+
+        // Create in Uninitialized state.
+        let r = unsafe { genesis_new(config.as_ptr(), None) };
+        assert!(r.success);
+
+        // Try abort_rotation from wrong state (Uninitialized).
+        let r = unsafe { genesis_abort_rotation(r.handle) };
+        assert!(!r.success);
+        assert_eq!(r.error_code, 102);
+        assert!(
+            !r.handle.ptr.is_null(),
+            "wrong-state error must return a non-null handle"
+        );
+        assert_eq!(
+            r.handle.state,
+            StateTag::Uninitialized,
+            "handle should still be in the original state"
         );
 
         unsafe {

@@ -259,16 +259,20 @@ func (b *BridgeBootstrapInjector) Bootstrap(ctx context.Context, bootstrap *gene
 	// 5. Build injection targets (primary + additional namespaces)
 	targets := []bridge.InjectTarget{
 		{
-			Name:      bootstrap.Spec.Output.SecretName,
-			Namespace: bootstrap.Spec.Output.SecretNamespace,
-			Key:       bootstrap.Spec.Output.SecretKey,
+			Name:               bootstrap.Spec.Output.SecretName,
+			Namespace:          bootstrap.Spec.Output.SecretNamespace,
+			Key:                bootstrap.Spec.Output.SecretKey,
+			BootstrapName:      bootstrap.Name,
+			BootstrapNamespace: bootstrap.Namespace,
 		},
 	}
 	for _, ns := range bootstrap.Spec.Output.AdditionalNamespaces {
 		targets = append(targets, bridge.InjectTarget{
-			Name:      bootstrap.Spec.Output.SecretName,
-			Namespace: ns,
-			Key:       bootstrap.Spec.Output.SecretKey,
+			Name:               bootstrap.Spec.Output.SecretName,
+			Namespace:          ns,
+			Key:                bootstrap.Spec.Output.SecretKey,
+			BootstrapName:      bootstrap.Name,
+			BootstrapNamespace: bootstrap.Namespace,
 		})
 	}
 

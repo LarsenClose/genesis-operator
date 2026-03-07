@@ -104,7 +104,7 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// 4. InjectSecret -> Active
-	if err := h.InjectSecret("test-secret", "default", "age-key"); err != nil {
+	if err := h.InjectSecret("test-secret", "default", "age-key", "", ""); err != nil {
 		t.Fatalf("InjectSecret() failed: %v", err)
 	}
 	if h.State() != StateActive {
@@ -132,7 +132,7 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// 7. CompleteRotation -> Active (with new key)
-	newArtifacts, err := h.CompleteRotation(kmsJSON, "new-secret", "default", "age-key")
+	newArtifacts, err := h.CompleteRotation(kmsJSON, "new-secret", "default", "age-key", "", "")
 	if err != nil {
 		t.Fatalf("CompleteRotation() failed: %v", err)
 	}
@@ -598,6 +598,65 @@ func TestBeginRotationWrongState(t *testing.T) {
 	}
 }
 
+func TestAbortRotation(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	kmsJSON := `{"provider_type":"mock"}`
+
+	// 1. New -> Uninitialized
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// 2. Init -> Initialized
+	_, err = h.Init(kmsJSON)
+	if err != nil {
+		t.Fatalf("Init() failed: %v", err)
+	}
+
+	// 3. BeginBootstrap -> Bootstrapping
+	if err := h.BeginBootstrap(kmsJSON); err != nil {
+		t.Fatalf("BeginBootstrap() failed: %v", err)
+	}
+
+	// 4. InjectSecret -> Active
+	if err := h.InjectSecret("test-secret", "default", "age-key", "", ""); err != nil {
+		t.Fatalf("InjectSecret() failed: %v", err)
+	}
+
+	// 5. BeginRotation -> Rotating
+	if err := h.BeginRotation(); err != nil {
+		t.Fatalf("BeginRotation() failed: %v", err)
+	}
+	if h.State() != StateRotating {
+		t.Fatalf("expected Rotating, got %v", h.State())
+	}
+
+	// 6. AbortRotation -> Active
+	if err := h.AbortRotation(); err != nil {
+		t.Fatalf("AbortRotation() failed: %v", err)
+	}
+	if h.State() != StateActive {
+		t.Fatalf("expected Active after abort, got %v", h.State())
+	}
+}
+
+func TestAbortRotationWrongState(t *testing.T) {
+	configJSON := `{"provider_type":"mock","provider_config":{}}`
+	h, err := New(configJSON)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer h.Free()
+
+	// AbortRotation from Uninitialized state should fail
+	err = h.AbortRotation()
+	if err == nil {
+		t.Error("expected error calling AbortRotation from Uninitialized state")
+	}
+}
+
 func TestCompleteRotationWrongState(t *testing.T) {
 	configJSON := `{"provider_type":"mock","provider_config":{}}`
 	kmsJSON := `{"provider_type":"mock"}`
@@ -608,7 +667,7 @@ func TestCompleteRotationWrongState(t *testing.T) {
 	defer h.Free()
 
 	// CompleteRotation from Uninitialized state should fail
-	_, err = h.CompleteRotation(kmsJSON, "secret", "ns", "key")
+	_, err = h.CompleteRotation(kmsJSON, "secret", "ns", "key", "", "")
 	if err == nil {
 		t.Error("expected error calling CompleteRotation from Uninitialized state")
 	}
@@ -623,7 +682,7 @@ func TestInjectSecretWrongState(t *testing.T) {
 	defer h.Free()
 
 	// InjectSecret from Uninitialized state should fail
-	err = h.InjectSecret("test", "ns", "key")
+	err = h.InjectSecret("test", "ns", "key", "", "")
 	if err == nil {
 		t.Error("expected error calling InjectSecret from Uninitialized state")
 	}

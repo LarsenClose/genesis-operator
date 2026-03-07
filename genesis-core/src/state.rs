@@ -518,6 +518,7 @@ impl Genesis<Active> {
 impl Genesis<Rotating> {
     /// Complete the rotation: generate a new keypair, re-encrypt with KMS,
     /// inject the new key, and transition back to `Active`.
+    #[allow(clippy::too_many_arguments)]
     pub fn complete_rotation(
         self,
         kms: &dyn KmsProvider,
@@ -525,6 +526,8 @@ impl Genesis<Rotating> {
         name: &str,
         ns: &str,
         key: &str,
+        bootstrap_name: Option<&str>,
+        bootstrap_namespace: Option<&str>,
     ) -> Result<(Genesis<Active>, PublicArtifacts), GenesisError> {
         // Generate new keypair.
         let (new_public_key, new_key_material) = age::generate_keypair()?;
@@ -536,6 +539,8 @@ impl Genesis<Rotating> {
         let metadata = crate::k8s::SecretMetadata {
             provider_type: Some(self.config.provider_type.clone()),
             public_key: Some(new_public_key.clone()),
+            bootstrap_name: bootstrap_name.map(|s| s.to_string()),
+            bootstrap_namespace: bootstrap_namespace.map(|s| s.to_string()),
         };
 
         // Inject new private key into K8s.
@@ -749,7 +754,15 @@ mod tests {
         let rotating = active.begin_rotation();
 
         let (new_active, new_artifacts) = rotating
-            .complete_rotation(&kms, &injector, "genesis-key", "genesis-system", "age.key")
+            .complete_rotation(
+                &kms,
+                &injector,
+                "genesis-key",
+                "genesis-system",
+                "age.key",
+                None,
+                None,
+            )
             .expect("rotation should succeed");
 
         // New key should differ from old key.
@@ -1012,6 +1025,8 @@ mod tests {
         let meta = crate::k8s::SecretMetadata {
             provider_type: Some("null-dev".to_string()),
             public_key: Some("age1testkey1234".to_string()),
+            bootstrap_name: None,
+            bootstrap_namespace: None,
         };
         let targets = vec![
             (

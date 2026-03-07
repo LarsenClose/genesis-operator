@@ -222,7 +222,8 @@ func (h *Handle) BeginBootstrap(kmsConfigJSON string) error {
 
 // InjectSecret writes the decrypted key material into a Kubernetes secret
 // and transitions from Bootstrapping to Active.
-func (h *Handle) InjectSecret(name, namespace, key string) error {
+// bootstrapName and bootstrapNamespace are optional -- pass empty strings to omit.
+func (h *Handle) InjectSecret(name, namespace, key, bootstrapName, bootstrapNamespace string) error {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	cNs := C.CString(namespace)
@@ -230,7 +231,18 @@ func (h *Handle) InjectSecret(name, namespace, key string) error {
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 
-	result := C.genesis_inject_secret(h.inner, cName, cNs, cKey)
+	var cBootName *C.char
+	if bootstrapName != "" {
+		cBootName = C.CString(bootstrapName)
+		defer C.free(unsafe.Pointer(cBootName))
+	}
+	var cBootNs *C.char
+	if bootstrapNamespace != "" {
+		cBootNs = C.CString(bootstrapNamespace)
+		defer C.free(unsafe.Pointer(cBootNs))
+	}
+
+	result := C.genesis_inject_secret(h.inner, cName, cNs, cKey, cBootName, cBootNs)
 	newH, _, err := resultToError(result)
 	h.recoverHandle(newH)
 	return err
@@ -238,9 +250,11 @@ func (h *Handle) InjectSecret(name, namespace, key string) error {
 
 // InjectTarget represents a single secret injection target.
 type InjectTarget struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Key       string `json:"key"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Key                string `json:"key"`
+	BootstrapName      string `json:"bootstrap_name,omitempty"`
+	BootstrapNamespace string `json:"bootstrap_namespace,omitempty"`
 }
 
 // InjectSecrets writes the decrypted key material into multiple Kubernetes
@@ -285,9 +299,19 @@ func (h *Handle) BeginRotation() error {
 	return err
 }
 
+// AbortRotation cancels a rotation in progress and transitions from
+// Rotating back to Active with the original key.
+func (h *Handle) AbortRotation() error {
+	result := C.genesis_abort_rotation(h.inner)
+	newH, _, err := resultToError(result)
+	h.recoverHandle(newH)
+	return err
+}
+
 // CompleteRotation generates a new keypair, re-encrypts, injects the new
 // secret, and transitions from Rotating back to Active.
-func (h *Handle) CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey string) (*PublicArtifacts, error) {
+// bootstrapName and bootstrapNamespace are optional -- pass empty strings to omit.
+func (h *Handle) CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey, bootstrapName, bootstrapNamespace string) (*PublicArtifacts, error) {
 	cKms := C.CString(kmsConfigJSON)
 	defer C.free(unsafe.Pointer(cKms))
 	cName := C.CString(secretName)
@@ -297,7 +321,18 @@ func (h *Handle) CompleteRotation(kmsConfigJSON, secretName, secretNamespace, se
 	cKey := C.CString(secretKey)
 	defer C.free(unsafe.Pointer(cKey))
 
-	result := C.genesis_complete_rotation(h.inner, cKms, cName, cNs, cKey)
+	var cBootName *C.char
+	if bootstrapName != "" {
+		cBootName = C.CString(bootstrapName)
+		defer C.free(unsafe.Pointer(cBootName))
+	}
+	var cBootNs *C.char
+	if bootstrapNamespace != "" {
+		cBootNs = C.CString(bootstrapNamespace)
+		defer C.free(unsafe.Pointer(cBootNs))
+	}
+
+	result := C.genesis_complete_rotation(h.inner, cKms, cName, cNs, cKey, cBootName, cBootNs)
 	newH, dataJSON, err := resultToError(result)
 	h.recoverHandle(newH)
 	if err != nil {

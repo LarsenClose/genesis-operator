@@ -101,7 +101,15 @@ fn test_rotation_lifecycle() {
 
     // Rotating -> Active (with new key)
     let (new_active, new_artifacts) = rotating
-        .complete_rotation(&kms, &injector, "genesis-key", "genesis-system", "age.key")
+        .complete_rotation(
+            &kms,
+            &injector,
+            "genesis-key",
+            "genesis-system",
+            "age.key",
+            None,
+            None,
+        )
         .expect("rotation should succeed");
 
     assert_ne!(
@@ -263,7 +271,15 @@ fn test_multiple_rotations() {
     for _ in 0..3 {
         let rotating = active.begin_rotation();
         let (new_active, new_artifacts) = rotating
-            .complete_rotation(&kms, &injector, "genesis-key", "genesis-system", "age.key")
+            .complete_rotation(
+                &kms,
+                &injector,
+                "genesis-key",
+                "genesis-system",
+                "age.key",
+                None,
+                None,
+            )
             .expect("rotation");
 
         // Each rotation must produce a key we haven't seen before.

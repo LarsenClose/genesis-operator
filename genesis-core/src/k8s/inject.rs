@@ -26,6 +26,10 @@ pub struct SecretMetadata {
     pub provider_type: Option<String>,
     /// Age public key (`age1...`), used to derive a fingerprint annotation.
     pub public_key: Option<String>,
+    /// Name of the GenesisBootstrap CR that manages this secret.
+    pub bootstrap_name: Option<String>,
+    /// Namespace of the GenesisBootstrap CR that manages this secret.
+    pub bootstrap_namespace: Option<String>,
 }
 
 impl SecretMetadata {
@@ -42,6 +46,12 @@ impl SecretMetadata {
         );
         if let Some(ref provider) = self.provider_type {
             labels.insert("genesis.io/provider".to_string(), provider.clone());
+        }
+        if let Some(ref name) = self.bootstrap_name {
+            labels.insert("genesis.io/bootstrap-name".to_string(), name.clone());
+        }
+        if let Some(ref ns) = self.bootstrap_namespace {
+            labels.insert("genesis.io/bootstrap-namespace".to_string(), ns.clone());
         }
         labels
     }
@@ -484,6 +494,8 @@ mod tests {
         let meta = SecretMetadata {
             provider_type: Some("aws-kms".to_string()),
             public_key: Some("age1abcdefghij".to_string()),
+            bootstrap_name: None,
+            bootstrap_namespace: None,
         };
 
         mock.inject(b"secret", "my-secret", "default", "key", Some(&meta))
@@ -502,6 +514,8 @@ mod tests {
         let meta = SecretMetadata {
             provider_type: Some("oci-vault".to_string()),
             public_key: None,
+            bootstrap_name: None,
+            bootstrap_namespace: None,
         };
         let labels = meta.labels();
         assert_eq!(
@@ -517,6 +531,8 @@ mod tests {
         let meta = SecretMetadata {
             provider_type: None,
             public_key: Some("age1abcdefghijklmnop".to_string()),
+            bootstrap_name: None,
+            bootstrap_namespace: None,
         };
         let annotations = meta.annotations();
         assert_eq!(
@@ -532,9 +548,49 @@ mod tests {
         let meta = SecretMetadata::default();
         let labels = meta.labels();
         assert!(!labels.contains_key("genesis.io/provider"));
+        assert!(!labels.contains_key("genesis.io/bootstrap-name"));
+        assert!(!labels.contains_key("genesis.io/bootstrap-namespace"));
         assert_eq!(
             labels.get("app.kubernetes.io/managed-by").unwrap(),
             "genesis-operator"
         );
+    }
+
+    #[test]
+    fn secret_metadata_bootstrap_labels_present_when_set() {
+        let meta = SecretMetadata {
+            provider_type: Some("aws-kms".to_string()),
+            public_key: None,
+            bootstrap_name: Some("my-bootstrap".to_string()),
+            bootstrap_namespace: Some("genesis-system".to_string()),
+        };
+        let labels = meta.labels();
+        assert_eq!(
+            labels.get("genesis.io/bootstrap-name").unwrap(),
+            "my-bootstrap"
+        );
+        assert_eq!(
+            labels.get("genesis.io/bootstrap-namespace").unwrap(),
+            "genesis-system"
+        );
+        assert_eq!(labels.get("genesis.io/provider").unwrap(), "aws-kms");
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by").unwrap(),
+            "genesis-operator"
+        );
+    }
+
+    #[test]
+    fn secret_metadata_bootstrap_labels_absent_when_none() {
+        let meta = SecretMetadata {
+            provider_type: Some("mock".to_string()),
+            public_key: None,
+            bootstrap_name: None,
+            bootstrap_namespace: None,
+        };
+        let labels = meta.labels();
+        assert!(!labels.contains_key("genesis.io/bootstrap-name"));
+        assert!(!labels.contains_key("genesis.io/bootstrap-namespace"));
+        assert_eq!(labels.get("genesis.io/provider").unwrap(), "mock");
     }
 }

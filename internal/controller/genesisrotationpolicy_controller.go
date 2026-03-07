@@ -73,7 +73,7 @@ func (e *BridgeRotationExecutor) Rotate(ctx context.Context, bootstrap *genesisv
 	}
 
 	// 5. Inject existing secret to reach Active state
-	if err := handle.InjectSecret(secretName, secretNamespace, secretKey); err != nil {
+	if err := handle.InjectSecret(secretName, secretNamespace, secretKey, bootstrap.Name, bootstrap.Namespace); err != nil {
 		return nil, fmt.Errorf("failed to inject secret: %w", err)
 	}
 
@@ -83,7 +83,7 @@ func (e *BridgeRotationExecutor) Rotate(ctx context.Context, bootstrap *genesisv
 	}
 
 	// 7. Complete rotation -- generates new keypair, KMS encrypts, injects new key
-	artifacts, err := handle.CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey)
+	artifacts, err := handle.CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey, bootstrap.Name, bootstrap.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete rotation: %w", err)
 	}
