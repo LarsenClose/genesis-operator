@@ -1,30 +1,36 @@
+version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
 
 linters:
-  # Use default linters plus errcheck (enabled by default)
-  # This matches what golangci-lint runs by default
+  default: none
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-
-linters-settings:
-  errcheck:
-    check-type-assertions: false
-    check-blank: false
-  govet:
-    # Only run default checks, not shadow/unusedwrite which require more refactoring
-    enable-all: false
-
-issues:
-  exclude-rules:
-    # Test files have more flexibility
-    - path: _test\.go
-      linters:
-        - errcheck
-        - govet
+  settings:
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+    govet:
+      enable-all: false
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"
+        - "-ST1003"
+        - "-ST1005"
+        - "-QF1003"
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - govet
+      - text: "Error return value of .*.Close.*is not checked"
+        linters:
+          - errcheck
