@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -513,13 +514,20 @@ func TestGenesisRotationPolicyReconciler_RotationDue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "age1testrotatedpublickey", updatedBootstrap.Spec.Envelope.PublicKey)
 
-	// Check for event
-	select {
-	case event := <-recorder.Events:
-		assert.Contains(t, event, "RotationSucceeded")
-	default:
-		t.Error("Expected RotationSucceeded event")
+	// Check for RotationSucceeded event (may follow verification warning events)
+	foundSucceeded := false
+	drainEvents:
+	for {
+		select {
+		case event := <-recorder.Events:
+			if strings.Contains(event, "RotationSucceeded") {
+				foundSucceeded = true
+			}
+		default:
+			break drainEvents
+		}
 	}
+	assert.True(t, foundSucceeded, "Expected RotationSucceeded event")
 }
 
 func TestGenesisRotationPolicyReconciler_RotationStrategies(t *testing.T) {
@@ -1807,4 +1815,388 @@ func TestGetRotationExecutor(t *testing.T) {
 		executor := reconciler.GetRotationExecutor()
 		assert.Equal(t, mock, executor)
 	})
+}
+
+func TestRotationExecutorError_ConditionAndEvent(t *testing.T) {
+	// Verifies that when the rotation executor returns an error (which in the
+	// bridge path triggers AbortRotation), the controller correctly:
+	// - Sets the RotationReady condition to False with the error message
+	// - Emits a RotationFailed warning event
+	// - Does NOT increment the rotation count
+	// - Requeues with a backoff interval
+	scheme := setupRotationScheme()
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+		},
+		Data: map[string][]byte{
+			"age.agekey": []byte("AGE-SECRET-KEY-1TEST"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	failingExecutor := &MockRotationExecutor{
+		Error: fmt.Errorf("CompleteRotation failed: KMS decrypt error"),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: failingExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute, result.RequeueAfter)
+
+	// Verify the executor was called
+	assert.True(t, failingExecutor.Called)
+
+	// Verify failure condition includes the error message
+	updated := &genesisv1alpha1.GenesisRotationPolicy{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updated)
+	require.NoError(t, err)
+
+	var foundCondition *metav1.Condition
+	for _, c := range updated.Status.Conditions {
+		if c.Type == genesisv1alpha1.ConditionTypeRotationReady {
+			foundCondition = &c
+			break
+		}
+	}
+	require.NotNil(t, foundCondition)
+	assert.Equal(t, metav1.ConditionFalse, foundCondition.Status)
+	assert.Equal(t, genesisv1alpha1.ReasonRotationFailed, foundCondition.Reason)
+	assert.Contains(t, foundCondition.Message, "CompleteRotation failed")
+
+	// Verify rotation count was NOT incremented
+	assert.Equal(t, int64(0), updated.Status.RotationCount)
+
+	// Verify RotationFailed event was emitted
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "RotationFailed")
+		assert.Contains(t, event, "CompleteRotation failed")
+	default:
+		t.Error("Expected RotationFailed event")
+	}
+
+	// Verify GenesisBootstrap was NOT updated (rotation failed before CR update)
+	updatedBootstrap := &genesisv1alpha1.GenesisBootstrap{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "test-bootstrap",
+		Namespace: "default",
+	}, updatedBootstrap)
+	require.NoError(t, err)
+	assert.Equal(t, "age1testpublickey", updatedBootstrap.Spec.Envelope.PublicKey,
+		"GenesisBootstrap should not be updated on rotation failure")
+}
+
+func TestPostRotationVerification_SecretWithCorrectData(t *testing.T) {
+	// Verifies that post-rotation verification passes without warnings
+	// when the source secret has the expected key and managed-by label.
+	scheme := setupRotationScheme()
+
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "genesis-operator",
+			},
+		},
+		Data: map[string][]byte{
+			"age.agekey": []byte("AGE-SECRET-KEY-1TEST"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	mockExecutor := newMockExecutor()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: mockExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 23*time.Hour)
+
+	// Verify rotation completed
+	updated := &genesisv1alpha1.GenesisRotationPolicy{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updated)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.Status.RotationCount)
+	require.NotNil(t, updated.Status.LastRotation)
+	assert.True(t, updated.Status.LastRotation.Success)
+
+	// Should have RotationSucceeded event but NO RotationVerificationWarning events
+	var events []string
+	drainLoop:
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			break drainLoop
+		}
+	}
+	// Expect only RotationSucceeded
+	require.NotEmpty(t, events, "Expected at least one event")
+	for _, event := range events {
+		assert.NotContains(t, event, "RotationVerificationWarning",
+			"Should not have verification warnings when secret has correct data and labels")
+	}
+}
+
+func TestPostRotationVerification_SecretMissingKey(t *testing.T) {
+	// Verifies that post-rotation verification emits a warning event
+	// when the source secret is missing the expected data key, but
+	// the rotation still succeeds (verification is best-effort).
+	scheme := setupRotationScheme()
+
+	// Secret exists but does NOT have the "age.agekey" data key
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "genesis-operator",
+			},
+		},
+		Data: map[string][]byte{
+			"wrong-key": []byte("some-value"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	mockExecutor := newMockExecutor()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: mockExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 23*time.Hour,
+		"Rotation should still succeed despite verification warning")
+
+	// Verify rotation completed successfully (best-effort verification)
+	updated := &genesisv1alpha1.GenesisRotationPolicy{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updated)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.Status.RotationCount)
+
+	// Should have a RotationVerificationWarning event for missing key
+	var events []string
+	drainLoop:
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			break drainLoop
+		}
+	}
+	foundKeyWarning := false
+	for _, event := range events {
+		if strings.Contains(event, "RotationVerificationWarning") && strings.Contains(event, "missing expected key") {
+			foundKeyWarning = true
+		}
+	}
+	assert.True(t, foundKeyWarning, "Expected RotationVerificationWarning event for missing key, got events: %v", events)
+}
+
+func TestPostRotationVerification_SecretMissingManagedByLabel(t *testing.T) {
+	// Verifies that post-rotation verification emits a warning event
+	// when the source secret lacks the managed-by label, but the rotation
+	// still succeeds (verification is best-effort).
+	scheme := setupRotationScheme()
+
+	// Secret has correct data key but NO managed-by label
+	sourceSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "source-secret",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-25 * time.Hour)),
+		},
+		Data: map[string][]byte{
+			"age.agekey": []byte("AGE-SECRET-KEY-1TEST"),
+		},
+	}
+
+	bootstrap := testBootstrap("source-secret", "default")
+
+	policy := &genesisv1alpha1.GenesisRotationPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{"genesis.io/rotation-finalizer"},
+		},
+		Spec: genesisv1alpha1.GenesisRotationPolicySpec{
+			Source: genesisv1alpha1.RotationSourceSpec{
+				Name:      "source-secret",
+				Namespace: "default",
+			},
+			Schedule: genesisv1alpha1.RotationScheduleSpec{
+				Interval: "24h",
+			},
+		},
+	}
+
+	mockExecutor := newMockExecutor()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, sourceSecret, bootstrap).
+		WithStatusSubresource(policy).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &controller.GenesisRotationPolicyReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		RotationExecutor: mockExecutor,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 23*time.Hour,
+		"Rotation should still succeed despite verification warning")
+
+	// Verify rotation completed successfully (best-effort verification)
+	updated := &genesisv1alpha1.GenesisRotationPolicy{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updated)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.Status.RotationCount)
+
+	// Should have a RotationVerificationWarning event for missing label
+	var events []string
+	drainLoop:
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			break drainLoop
+		}
+	}
+	foundLabelWarning := false
+	for _, event := range events {
+		if strings.Contains(event, "RotationVerificationWarning") && strings.Contains(event, "managed-by label") {
+			foundLabelWarning = true
+		}
+	}
+	assert.True(t, foundLabelWarning, "Expected RotationVerificationWarning event for missing managed-by label, got events: %v", events)
 }

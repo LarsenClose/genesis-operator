@@ -83,8 +83,13 @@ func (e *BridgeRotationExecutor) Rotate(ctx context.Context, bootstrap *genesisv
 	}
 
 	// 7. Complete rotation -- generates new keypair, KMS encrypts, injects new key
+	// If CompleteRotation fails, abort the rotation to clean up state machine
+	// and emit a proper audit event before returning the error.
 	artifacts, err := handle.CompleteRotation(kmsConfigJSON, secretName, secretNamespace, secretKey, bootstrap.Name, bootstrap.Namespace)
 	if err != nil {
+		if abortErr := handle.AbortRotation(); abortErr != nil {
+			log.FromContext(ctx).Error(abortErr, "failed to abort rotation after CompleteRotation error")
+		}
 		return nil, fmt.Errorf("failed to complete rotation: %w", err)
 	}
 
@@ -328,7 +333,27 @@ func (r *GenesisRotationPolicyReconciler) performRotation(ctx context.Context, p
 		return fmt.Errorf("failed to update GenesisBootstrap after rotation: %w", err)
 	}
 
-	// 5. Apply strategy-specific post-rotation annotations
+	// 5. Verify the rotated secret (best-effort — cache lag may delay visibility)
+	secretName := policy.Spec.Source.Name
+	secretNamespace := policy.Spec.Source.Namespace
+	verifySecret := &corev1.Secret{}
+	verifyKey := types.NamespacedName{Name: secretName, Namespace: secretNamespace}
+	if err := r.Get(ctx, verifyKey, verifySecret); err != nil {
+		logger.Info("Post-rotation verification: secret not yet visible (cache lag expected)", "error", err)
+	} else {
+		if _, ok := verifySecret.Data[secretKey]; !ok {
+			logger.Info("Post-rotation verification: secret missing expected key", "key", secretKey)
+			r.Recorder.Event(policy, corev1.EventTypeWarning, "RotationVerificationWarning",
+				fmt.Sprintf("Post-rotation secret %s/%s missing expected key %q", secretNamespace, secretName, secretKey))
+		}
+		if verifySecret.Labels == nil || verifySecret.Labels["app.kubernetes.io/managed-by"] != "genesis-operator" {
+			logger.Info("Post-rotation verification: secret missing genesis-operator managed-by label")
+			r.Recorder.Event(policy, corev1.EventTypeWarning, "RotationVerificationWarning",
+				fmt.Sprintf("Post-rotation secret %s/%s missing app.kubernetes.io/managed-by label", secretNamespace, secretName))
+		}
+	}
+
+	// 6. Apply strategy-specific post-rotation annotations
 	r.applyRotationAnnotations(ctx, secret, policy, strategyType)
 
 	logger.Info("Cryptographic rotation completed", "strategy", strategyType)
